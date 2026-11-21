@@ -1,0 +1,165 @@
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+
+// GUI 冒烟测试：启动 QqShot → 触发全局热键 → 确认浮层窗口出现 → 模拟拖拽选区 → 关闭
+[DllImport("user32.dll", SetLastError = true)]
+static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+[DllImport("user32.dll")] static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+[DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+[DllImport("user32.dll")] static extern void mouse_event(uint f, uint dx, uint dy, uint d, IntPtr e);
+[DllImport("user32.dll")] static extern IntPtr FindWindow(string cls, string win);
+[DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+[DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr h);
+[DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr p);
+[DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+[DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+[DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+delegate bool EnumProc(IntPtr h, IntPtr p);
+[StructLayout(LayoutKind.Sequential)] struct RECT { public int L, T, R, B; }
+
+var log = new List<string>();
+void L(string s) { log.Add(s); Console.WriteLine(s); }
+
+L("=== GUI 冒烟测试 ===");
+
+// 找到 QqShot 进程
+var proc = Process.GetProcessesByName("QqShot").FirstOrDefault();
+if (proc == null) { L("[FAIL] QqShot 未运行"); Environment.Exit(1); }
+L($"[OK] QqShot 运行中 PID={proc.Id}");
+
+// 枚举其窗口
+var windows = new List<(IntPtr h, string title, RECT r, bool vis)>();
+EnumWindows((h, _) =>
+{
+    uint pid;
+    GetWindowThreadProcessId(h, out pid);
+    if (pid == (uint)proc.Id)
+    {
+        int len = GetWindowTextLength(h);
+        var sb = new System.Text.StringBuilder(len + 2);
+        GetWindowText(h, sb, sb.Capacity);
+        GetWindowRect(h, out var r);
+        windows.Add((h, sb.ToString(), r, IsWindowVisible(h)));
+    }
+    return true;
+}, IntPtr.Zero);
+
+L($"[OK] QqShot 窗口数: {windows.Count}");
+foreach (var w in windows)
+    L($"     hwnd={w.h} vis={w.vis} title='{w.title}' rect={w.r.L},{w.r.T},{w.r.R},{w.r.B}");
+
+// 触发热键：用 keybd_event 模拟 Ctrl+Alt+A
+const uint MOD_ALT = 0x0001, MOD_CONTROL = 0x0002;
+const uint KEYEVENTF_KEYUP = 0x0002;
+var sig = new IntPtr(MOD_CONTROL | MOD_ALT);
+
+// 通过 SetWindowsHookEx 太重；改为直接给 QqShot 发 WM_HOTKEY
+// 但 WM_HOTKEY 只能发到注册了热键的窗口 —— QqShot 用的是隐藏消息窗口，需要找到它
+// 隐藏窗口没有标题且不可见。用 EnumWindows 找 QqShot 下 class 为 QqShotHotkeySink 的窗口
+var sink = IntPtr.Zero;
+EnumWindows((h, _) =>
+{
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    if (pid == (uint)proc.Id)
+    {
+        var cls = new System.Text.StringBuilder(256);
+        GetClassName(h, cls, 256);
+        if (cls.ToString().Contains("QqShotHotkeySink")) sink = h;
+    }
+    return true;
+}, IntPtr.Zero);
+
+if (sink == IntPtr.Zero)
+{
+    L("[FAIL] 未找到热键消息窗口 QqShotHotkeySink");
+    Environment.Exit(1);
+}
+L($"[OK] 找到热键窗口 hwnd={sink}");
+
+// 发送 WM_HOTKEY
+PostMessage(sink, 0x0312, (IntPtr)1, IntPtr.Zero);
+L("[OK] 已发送 WM_HOTKEY");
+
+// 等待浮层出现
+Thread.Sleep(1200);
+var overlays = new List<(IntPtr h, RECT r)>();
+EnumWindows((h, _) =>
+{
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    if (pid == (uint)proc.Id && IsWindowVisible(h))
+    {
+        GetWindowRect(h, out var r);
+        overlays.Add((h, r));
+    }
+    return true;
+}, IntPtr.Zero);
+
+L($"[OK] 可见窗口数: {overlays.Count}");
+foreach (var o in overlays)
+    L($"     hwnd={o.h} rect={o.r.L},{o.r.T},{o.r.R - o.r.L}x{o.r.B - o.r.T}");
+
+var ov = overlays.FirstOrDefault(o => o.r.R - o.r.L > 800 && o.r.B - o.r.T > 600);
+if (ov.h == IntPtr.Zero) { L("[FAIL] 未出现全屏选区浮层"); Environment.Exit(1); }
+L($"[OK] 选区浮层已创建: {ov.r.R - ov.r.L}x{ov.r.B - ov.r.T}");
+
+// 截取浮层画面验证渲染
+using (var bmp = new Bitmap(ov.r.R - ov.r.L, ov.r.B - ov.r.T, PixelFormat.Format32bppArgb))
+using (var g = Graphics.FromImage(bmp))
+{
+    g.CopyFromScreen(ov.r.L, ov.r.T, 0, 0, bmp.Size);
+    var mid = bmp.GetPixel(bmp.Width / 2, bmp.Height / 2);
+    var corner = bmp.GetPixel(5, 5);
+    L($"     浮层中心像素={mid} 角落像素={corner}");
+    bmp.Save(@"C:\Users\openwrt\WorkBuddy\2026-11-17-16-34-08\verify\overlay.png", ImageFormat.Png);
+    L("[OK] 浮层截图已保存");
+}
+
+// 模拟拖拽选区：按下 → 移动 → 抬起
+SetCursorPos(400, 300);
+mouse_event(0x0002, 0, 0, 0, IntPtr.Zero);   // LEFTDOWN
+Thread.Sleep(120);
+SetCursorPos(900, 700);
+mouse_event(0x0001, 0, 0, 0, IntPtr.Zero);   // MOVE
+Thread.Sleep(200);
+mouse_event(0x0004, 0, 0, 0, IntPtr.Zero);   // LEFTUP
+Thread.Sleep(1200);
+
+L("=== 拖拽后状态 ===");
+var after = new List<(IntPtr h, RECT r, string title)>();
+EnumWindows((h, _) =>
+{
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    if (pid == (uint)proc.Id && IsWindowVisible(h))
+    {
+        GetWindowRect(h, out var r);
+        int len = GetWindowTextLength(h);
+        var sb = new System.Text.StringBuilder(len + 2);
+        GetWindowText(h, sb, sb.Capacity);
+        after.Add((h, r, sb.ToString()));
+    }
+    return true;
+}, IntPtr.Zero);
+
+L($"[OK] 可见窗口数: {after.Count}");
+foreach (var w in after)
+    L($"     hwnd={w.h} size={w.r.R - w.r.L}x{w.r.B - w.r.T} title='{w.title}'");
+
+// 编辑器窗口应该出现（标题栏含 QqShot）
+var editor = after.FirstOrDefault(w => w.title.Contains("QqShot"));
+if (editor.h != IntPtr.Zero)
+{
+    L($"[OK] 编辑器窗口已打开: {editor.r.R - editor.r.L}x{editor.r.B - editor.r.T}");
+    using var bmp = new Bitmap(editor.r.R - editor.r.L, editor.r.B - editor.r.T, PixelFormat.Format32bppArgb);
+    using var g = Graphics.FromImage(bmp);
+    g.CopyFromScreen(editor.r.L, editor.r.T, 0, 0, bmp.Size);
+    bmp.Save(@"C:\Users\openwrt\WorkBuddy\2026-11-17-16-34-08\verify\editor.png", ImageFormat.Png);
+    L("[OK] 编辑器截图已保存");
+}
+else
+{
+    L("[WARN] 未检测到编辑器窗口（可能是拖拽未生效）");
+}
+
+File.WriteAllLines(@"C:\Users\openwrt\WorkBuddy\2026-11-17-16-34-08\verify\gui.log", log);

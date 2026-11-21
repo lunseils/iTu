@@ -1,0 +1,31 @@
+# 编译产物
+bin/
+obj/
+dist/
+out/
+publish/
+*.user
+*.suo
+*.cache
+
+# .NET
+project.lock.json
+*.dll
+*.exe
+*.pdb
+*.deps.json
+*.runtimeconfig.json
+
+# 临时/验证产物
+verify/*.png
+verify/*.jpg
+verify/*.jpeg
+*.log
+itu.log
+
+# 工作区私有数据（不随代码共享）
+.workbuddy/
+
+# 系统
+Thumbs.db
+.DS_Store
