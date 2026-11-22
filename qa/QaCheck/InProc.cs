@@ -2,8 +2,8 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using QqShot.Core;
-using QqShot.Ui;
+using iTu.Core;
+using iTu.Ui;
 
 namespace QaCheck;
 

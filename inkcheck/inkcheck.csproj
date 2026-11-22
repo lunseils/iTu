@@ -8,6 +8,6 @@
     <AssemblyName>InkCheck</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="iTu"><HintPath>C:/Users/openwrt/WorkBuddy/2026-11-17-16-34-08/QqShot/bin/Debug/net10.0-windows/iTu.dll</HintPath></Reference>
+    <Reference Include="iTu"><HintPath>C:/Users/openwrt/WorkBuddy/2026-11-17-16-34-08/iTu/bin/Debug/net10.0-windows/iTu.dll</HintPath></Reference>
   </ItemGroup>
 </Project>

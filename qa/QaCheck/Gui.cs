@@ -1,6 +1,6 @@
 using System.Diagnostics;
 using System.Drawing.Imaging;
-using QqShot.Core;
+using iTu.Core;
 
 namespace QaCheck;
 
@@ -738,7 +738,7 @@ internal static class Gui
                 // 关键：产品吸附用的是 DWM 真实边框（ExtentedFrameBounds，Win11 会内缩 7px），
                 // 直接用 GetWindowRect 会得到 13px 的距离，超过 12px 阈值 → 测不出吸附。
                 Rectangle dwm = Rectangle.Empty;
-                if (!QqShot.Core.ScreenCapture.TryGetWindowRect(ah, out dwm))
+                if (!iTu.Core.ScreenCapture.TryGetWindowRect(ah, out dwm))
                 {
                     foreach (var w in W.VisibleWindows()) if (w.Hwnd == ah) dwm = new Rectangle(w.Rect.Left, w.Rect.Top, w.Rect.Width, w.Rect.Height);
                 }

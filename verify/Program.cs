@@ -1,8 +1,8 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
-using QqShot.Core;
-using QqShot.Ui;
+using iTu.Core;
+using iTu.Ui;
 
 var log = new System.Text.StringBuilder();
 void Section(string s) => log.AppendLine($"\n=== {s} ===");

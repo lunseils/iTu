@@ -5,7 +5,7 @@
 
 一个 Windows 桌面截图工具，复刻 QQ 截图与 Windows 11 截图工具的核心交互体验。
 
-> 工程目录名仍叫 `QqShot`（历史原因），产物名是 `iTu.exe`。
+> 工程目录名为 `iTu`，产物名是 `iTu.exe`。
 
 ---
 
@@ -71,14 +71,14 @@ dotnet publish -c Release -r win-x64 -p:SelfContained=true \
 
 #### 一键发布（推荐）
 
-运行 `QqShot\publish.cmd`，自动完成：检查运行实例 → 清旧 dist → 发布轻量版 → 发布独立版 → 构建快捷方式工具 → 刷新桌面图标。
+运行 `iTu\publish.cmd`，自动完成：检查运行实例 → 清旧 dist → 发布轻量版 → 发布独立版 → 构建快捷方式工具 → 刷新桌面图标。
 
 ---
 
 ## 🏗️ 代码结构
 
 ```
-QqShot/
+iTu/
 ├── Program.cs               # 入口（单实例 + 托盘 + 全局热键）
 ├── AppContext.cs            # 应用上下文
 ├── SettingsForm.cs          # 设置面板

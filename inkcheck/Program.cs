@@ -2,8 +2,8 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.Reflection;
 using System.Windows.Forms;
-using QqShot.Core;
-using QqShot.Ui;
+using iTu.Core;
+using iTu.Ui;
 
 int pass = 0, fail = 0;
 void Check(bool ok, string name, string detail = "")

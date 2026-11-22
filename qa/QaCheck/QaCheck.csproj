@@ -12,9 +12,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="..\..\QqShot\Core\*.cs" Link="Core\%(Filename)%(Extension)" />
-    <None Include="..\..\QqShot\Core\ocr.ps1" Link="ocr.ps1" CopyToOutputDirectory="PreserveNewest" />
-    <Compile Include="..\..\QqShot\Ui\*.cs" Link="Ui\%(Filename)%(Extension)" />
-    <Compile Include="..\..\QqShot\RecordPanel.cs" Link="RecordPanel.cs" />
+    <Compile Include="..\..\iTu\Core\*.cs" Link="Core\%(Filename)%(Extension)" />
+    <None Include="..\..\iTu\Core\ocr.ps1" Link="ocr.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <Compile Include="..\..\iTu\Ui\*.cs" Link="Ui\%(Filename)%(Extension)" />
+    <Compile Include="..\..\iTu\RecordPanel.cs" Link="RecordPanel.cs" />
   </ItemGroup>
 </Project>

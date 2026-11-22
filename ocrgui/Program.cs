@@ -100,7 +100,7 @@ static class P
 {
     const string Root = @"C:/Users/openwrt/WorkBuddy/2026-11-17-16-34-08/";
     const string OutDir = Root + "verify/";
-    const string Exe = Root + "QqShot/bin/Debug/net10.0-windows/iTu.exe";
+    const string Exe = Root + "iTu/bin/Debug/net10.0-windows/iTu.exe";
     const string Sample = Root + "verify/ocr_sample.txt";
 
     // 选区与胶囊位置（胶囊底边居中、在选区下方 16px，见 OverlaySession.LayoutChrome）

@@ -1,7 +1,7 @@
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
-using QqShot.Core;
-using QqShot.Ui;
+using iTu.Core;
+using iTu.Ui;
 
 namespace QaCheck;
 
@@ -132,7 +132,7 @@ internal static class Round2
 
             var monitors = DisplayInfo.GetMonitors();
             var vb = DisplayInfo.GetVirtualBounds(monitors);
-            var snap = QqShot.Core.ScreenCapture.CaptureDesktop(vb);
+            var snap = iTu.Core.ScreenCapture.CaptureDesktop(vb);
             rep.Info($"产品枚举到 {snap.Windows.Count} 个窗口：");
             foreach (var kv in snap.Windows)
                 rep.Info($"   hwnd=0x{kv.Key.ToInt64():X} rect={kv.Value}");
