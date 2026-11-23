@@ -20,6 +20,12 @@
 
 ![iTu 设置界面](docs/screenshots/settings-ui.png)
 
+### 文字提取结果（复制）
+
+![iTu 文字提取结果面板](docs/screenshots/ocr-result-ui.png)
+
+左侧原图支持拖拽平移与滚轮缩放；右侧文字可选中复制，底部「一键复制」复制全文。
+
 ---
 
 ## ✨ 功能特性
