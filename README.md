@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![.NET](https://img.shields.io/badge/.NET-10-512BD4.svg)](https://dotnet.microsoft.com/)
 
-一个 Windows 桌面截图工具，复刻 QQ 截图与 Windows 11 截图工具的核心交互体验。
+一个 Windows 桌面截图工具，复刻 QQ 截图工具的核心交互体验。
 可选接入大模型：在线识图使用 **DeepSeek-OCR**，翻译可使用 **Hunyuan-MT-7B**，识别与译文均原位写回截图。
 
 > 工程目录名为 `iTu`，产物名是 `iTu.exe`。
