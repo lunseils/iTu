@@ -388,12 +388,17 @@ public sealed class AppContext : ApplicationContext
         // 每个会话各自独立的消息循环 + 独立遮罩层，互不阻塞。
         // 但并发数必须设上限：连按热键可开任意多个全屏浮层，耗尽资源且输入互相打架。
         const int MaxCaptureSessions = 3;
-        if (Volatile.Read(ref _captureSessions) >= MaxCaptureSessions)
+        // 检查与递增必须原子：否则两个热键回调可能同时读到"未满"再各自 +1，突破上限。
+        int cur;
+        do
         {
-            Log.Info($"[capture] 并发截图已达上限 {MaxCaptureSessions}，忽略本次触发");
-            return;
-        }
-        Interlocked.Increment(ref _captureSessions);
+            cur = Volatile.Read(ref _captureSessions);
+            if (cur >= MaxCaptureSessions)
+            {
+                Log.Info($"[capture] 并发截图已达上限 {MaxCaptureSessions}，忽略本次触发");
+                return;
+            }
+        } while (Interlocked.CompareExchange(ref _captureSessions, cur + 1, cur) != cur);
         var thread = new Thread(() =>
         {
             try
@@ -445,7 +450,11 @@ public sealed class AppContext : ApplicationContext
             return;
         }
 
-        if (!ok || img == null) return;
+        if (!ok || img == null)
+        {
+            img?.Dispose();   // ok=false 但已抓到图时也要释放，避免异常会话泄漏全屏位图
+            return;
+        }
 
         // 顶部功能条的「全屏截图」也是走这条路：选区 = 整块虚拟桌面。
         // 顶部功能条的"保存"：直接写文件
@@ -642,8 +651,8 @@ public sealed class AppContext : ApplicationContext
 
     private void OpenSettings()
     {
-        var form = new SettingsForm(_settings);
-        form.ShowDialog();
+        using (var form = new SettingsForm(_settings))
+            form.ShowDialog();
         _hotkeys.UnregisterAll();
         RegisterHotkeys();
         ApplyStartup();

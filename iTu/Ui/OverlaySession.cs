@@ -903,12 +903,29 @@ public sealed class OverlaySession : IDisposable
 
     private (Cursor Cursor, string Name) ComputeCursor(Point p)
     {
-        // 未编辑（未选工具）时，鼠标在选区（脏区）内部 → 移动光标；
-        // 其余状态（次级胶囊、画形状、工具栏、选区把手等）统一普通箭头。
+        // 未编辑（未选工具）时，脏区的 8 个把手按"拖动方向/调整尺寸"显示对应光标：
+        //   四边中点 → 水平/垂直调整；四角 → 对角缩放；框内 → 整体移动。
+        // 拖拽缩放过程中用已锁定的 _grip，避免把手随鼠标移动后命中漂移。
         if (Tool == null && Selection.Width > 8 && Selection.Height > 8)
         {
-            if (GripAt(Selection, p) == Grip.Move)
-                return (Cursors.SizeAll, "move");
+            var grip = _dragging && _grip != Grip.None ? _grip : GripAt(Selection, p);
+            switch (grip)
+            {
+                case Grip.Move:
+                    return (Cursors.SizeAll, "move");
+                case Grip.L:
+                case Grip.R:
+                    return (Cursors.SizeWE, "resize-we");
+                case Grip.T:
+                case Grip.B:
+                    return (Cursors.SizeNS, "resize-ns");
+                case Grip.TL:
+                case Grip.BR:
+                    return (Cursors.SizeNWSE, "resize-nwse");
+                case Grip.TR:
+                case Grip.BL:
+                    return (Cursors.SizeNESW, "resize-nesw");
+            }
         }
 
         return (Cursors.Default, "arrow");
@@ -1590,10 +1607,7 @@ public sealed class OverlaySession : IDisposable
         finally
         {
             // 丢弃模态期间积压的鼠标事件，重置光标基准与时间戳，避免残留被当成新拖拽。
-            Native.GetCursorPos(out var c);
-            _current = new Point(c.X, c.Y);
-            _lastDownTick = Environment.TickCount64;
-            _modalOpen = false;
+            ResetAfterModal();
         }
 
         if (result is { } text)
@@ -1906,6 +1920,21 @@ public sealed class OverlaySession : IDisposable
         }
     }
 
+    /// <summary>模态面板关闭后，把浮层输入状态恢复到干净基准。</summary>
+    private void ResetAfterModal()
+    {
+        Native.GetCursorPos(out var c);
+        _current = new Point(c.X, c.Y);
+        _lastDownTick = Environment.TickCount64;
+        _dragging = false;
+        _grip = Grip.None;
+        _radiusDrag = false;
+        _inkActive = false;
+        _active = null;
+        _downConsumed = false;
+        _modalOpen = false;
+    }
+
     private void StartTextTask(bool translate)
     {
         if (_textBusy) return;
@@ -2034,12 +2063,12 @@ public sealed class OverlaySession : IDisposable
         // 会话已经结束（用户在识别途中保存/取消）：标签无处可贴，结果也不再需要
         if (_finished) return;
 
-        var owner = translate ? PillAction.Translate : PillAction.Ocr;
+        var pillOwner = translate ? PillAction.Translate : PillAction.Ocr;
 
         if (error != null)
         {
             Log.Info($"[text] {(translate ? "翻译" : "识别")}失败: {error}");
-            SetPillStatus(owner, translate ? "翻译失败" : "识别失败", 3000);
+            SetPillStatus(pillOwner, translate ? "翻译失败" : "识别失败", 3000);
             return;
         }
 
@@ -2047,30 +2076,62 @@ public sealed class OverlaySession : IDisposable
         {
             // 这是用户得到的**唯一**反馈（没有面板、没有弹窗），所以停留久一点
             Log.Info($"[text] {(translate ? "翻译" : "识别")}：选区里没有文字，停在截图界面并贴标签");
-            SetPillStatus(owner, "未识别到文字", 4500);
+            SetPillStatus(pillOwner, "未识别到文字", 4500);
             return;
         }
 
         // ---- 文字提取（识图）与翻译走不同的收尾 ----
         // 翻译：把译文"原位替换"写回画面（原文被采样背景填掉，再按原字号重写译文）。
-        // 文字提取：只把识别结果复制到剪贴板，**绝不碰图面** —— OCR 对代码/URL 等
-        // 非自然语言文本识别本就有错别字，若把识别结果重写回画面会把原文擦掉、
-        // 用错误文本覆盖，等于"弄脏"了用户的截图（历史 BUG）。
+        // 文字提取：弹出双栏结果面板（左侧原图可缩放、右侧文本可选中复制），
+        // 同时保留原有的"自动复制到剪贴板"，但**绝不碰图面** —— OCR 对代码/URL 等
+        // 非自然语言文本识别本就有错别字，重写回画面会弄脏用户截图（历史 BUG）。
         if (!translate)
         {
-            // 提取：复制全文到剪贴板，图面保持原样。
-            string full = string.Join(Environment.NewLine, lines.Select(l => l.Text));
+            // 本地 OCR 的行框是真实坐标：按原图排版（缩进/同行/段间距）重建文本，
+            // 在线纯文本 OCR 只有整图兜底坐标时自动退化为简单逐行拼接。
+            string full = OcrService.BuildLayoutText(lines, clipped.Width, clipped.Height);
+            bool copied = false;
             try
             {
                 Clipboard.SetText(full);
+                copied = true;
                 Log.Info($"[text] 识别成功 {lines.Count} 行，已复制到剪贴板（未改动图面）");
-                SetPillStatus(owner, $"已提取 {lines.Count} 行 · 已复制", 3200);
             }
             catch (Exception ex)
             {
                 Log.Info("[text] 复制到剪贴板失败: " + ex.Message);
-                SetPillStatus(owner, $"已提取 {lines.Count} 行 · 复制失败", 3200);
             }
+
+            // 全局低级鼠标钩子不认识窗口归属：弹出面板期间必须封住浮层输入，
+            // 否则用户在文本框里选中/复制文字会被浮层当成选区拖拽。
+            var host = _forms.FirstOrDefault();
+            if (host != null)
+            {
+                _modalOpen = true;
+                _dragging = false;
+                _grip = Grip.None;
+                _radiusDrag = false;
+                _inkActive = false;
+                _active = null;
+                _downConsumed = false;
+
+                try
+                {
+                    using var preview = CropSnapshot(clipped);
+                    using var resultForm = new OcrResultForm(preview, full);
+                    resultForm.ShowDialog(host);
+                }
+                catch (Exception ex)
+                {
+                    Log.Info("[text] 文字提取结果面板打开失败: " + ex.Message);
+                }
+                finally
+                {
+                    ResetAfterModal();
+                }
+            }
+
+            SetPillStatus(pillOwner, $"已提取 {lines.Count} 行 · {(copied ? "已复制" : "复制失败")}", 3200);
             Redraw();
             return;
         }
@@ -2090,7 +2151,7 @@ public sealed class OverlaySession : IDisposable
         if (changed == 0)
         {
             Log.Info("[text] 译文与原文完全一致，判定翻译未生效");
-            SetPillStatus(owner, "翻译失败", 3000);
+            SetPillStatus(pillOwner, "翻译失败", 3000);
             return;
         }
 
@@ -2099,7 +2160,7 @@ public sealed class OverlaySession : IDisposable
 
         Log.Info($"[text] 已把 {placed} 行译文写回选区画面（共 {lines.Count} 行）");
 
-        SetPillStatus(owner,
+        SetPillStatus(pillOwner,
             placed > 0 ? $"已翻译 {placed} 行" : "处理失败",
             3200);
         Redraw();
@@ -2533,6 +2594,10 @@ public sealed class OverlaySession : IDisposable
 
     private void OnKeyDown(object? sender, KeyEventArgs e)
     {
+        // 模态框（文字输入 / 取色 / OCR 结果面板）显示期间，Esc/Enter 属于模态框，
+        // 不能被浮层当成"取消截图/确认保存"，否则会话会在模态框仍打开时被结束。
+        if (_finished || _modalOpen) return;
+
         switch (e.KeyCode)
         {
             case Keys.Escape:

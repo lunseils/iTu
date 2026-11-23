@@ -13,6 +13,9 @@ namespace iTu.Ui;
 public static class MenuTexture
 {
     private static readonly Dictionary<Size, Bitmap> Cache = new();
+    // 窗口每次缩放都会产生一个新尺寸键；不设上限会让带 GDI 句柄的位图无限累积。
+    private static readonly List<Size> Order = new();
+    private const int MaxCached = 32;
 
     private static Bitmap? _tile;
 
@@ -84,7 +87,19 @@ public static class MenuTexture
                 for (int x = -size.Height; x < size.Width; x += 7)
                     g.DrawLine(pen, x, size.Height, x + size.Height, 0);
 
+            // 超过上限时淘汰最早缓存的尺寸（跳过本次 size，避免释放刚生成的位图）。
+            if (Cache.Count >= MaxCached)
+            {
+                for (int i = 0; i < Order.Count && Cache.Count >= MaxCached;)
+                {
+                    var old = Order[i];
+                    if (old == size) { i++; continue; }
+                    if (Cache.Remove(old, out var dead)) dead.Dispose();
+                    Order.RemoveAt(i);
+                }
+            }
             Cache[size] = bmp;
+            Order.Add(size);
             return bmp;
         }
     }

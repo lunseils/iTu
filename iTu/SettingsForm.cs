@@ -436,7 +436,7 @@ public sealed class SettingsForm : Form
 
         // 标题栏文字
         using (var brush = new SolidBrush(Theme.Text))
-            g.DrawString("设置", Theme.Font(11f, FontStyle.Bold), brush, 26, 14);
+            g.DrawString("设置", Theme.TitleFont, brush, 26, 14);
 
         base.OnPaint(e);
     }

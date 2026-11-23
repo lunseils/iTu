@@ -1,0 +1,12 @@
+# Windows 批处理必须 CRLF + GBK：cmd.exe 按字节解析，LF 会截断中文提示字节。
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# PowerShell / 源码统一 LF；ocr.ps1 必须保持纯 ASCII（无 BOM），避免 PowerShell 5.1 按 GBK 解码。
+*.ps1 text eol=lf
+*.cs  text eol=lf
+*.csproj text eol=lf
+
+# 二进制资源不做换行转换
+*.png binary
+*.ico binary

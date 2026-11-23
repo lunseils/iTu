@@ -164,20 +164,23 @@ public static class AppInfo
             try { path = p.MainModule?.FileName; } catch { /* 权限不足 → 下面按"无法校验"处理 */ }
 
             bool knownPath = !string.IsNullOrEmpty(info.ExePath) && Path.IsPathFullyQualified(info.ExePath);
-            if (knownPath)
+            if (!knownPath)
             {
-                if (string.IsNullOrEmpty(path))
-                {
-                    error = "无法读取目标进程路径以校验 PID 复用，已取消结束操作（请到任务管理器手动结束）";
-                    return false;
-                }
-                if (!string.Equals(path, info.ExePath, StringComparison.OrdinalIgnoreCase))
-                {
-                    error = "PID 已被其它程序复用，已取消";
-                    return false;
-                }
+                // 没有任何可用于校验的路径依据时，绝不静默 Kill——PID 复用场景下会误杀无关进程。
+                error = "无法校验目标进程身份（未记录有效路径），已取消结束操作（请到任务管理器手动结束）";
+                return false;
             }
-            // knownPath=false：旧版本标记没写路径，无校验依据，维持原行为（信任标记直接结束）
+
+            if (string.IsNullOrEmpty(path))
+            {
+                error = "无法读取目标进程路径以校验 PID 复用，已取消结束操作（请到任务管理器手动结束）";
+                return false;
+            }
+            if (!string.Equals(path, info.ExePath, StringComparison.OrdinalIgnoreCase))
+            {
+                error = "PID 已被其它程序复用，已取消";
+                return false;
+            }
 
             p.Kill();
             if (!p.WaitForExit(3000))

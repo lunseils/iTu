@@ -7,7 +7,7 @@
       若写成 net10.0-windows10.0.19041.0，SDK 会自动引入
       Microsoft.Windows.SDK.NET.dll（约 25MB 的 WinRT 投影）。
       OCR 改由系统自带 PowerShell 调用 WinRT 完成，
-      从而让单文件发布后的体积仅约 170KB。
+      从而让框架依赖单文件发布体积仅约 500KB。
     -->
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
@@ -30,7 +30,7 @@
       旧实例常驻托盘并占着热键时，用户很容易以为改动没生效，
       托盘提示 / 关于-诊断 / 日志里都会打印这个号，便于自证在跑哪一份。
     -->
-    <Version>1.1.12</Version>
+    <Version>1.1.19</Version>
   </PropertyGroup>
 
   <ItemGroup>

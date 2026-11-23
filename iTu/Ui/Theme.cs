@@ -107,6 +107,12 @@ public static class Theme
 
     public static readonly Font MonoFont = new("Consolas", 8.5f, FontStyle.Regular, GraphicsUnit.Point);
 
+    /// <summary>窗体标题（设置/关于 OnPaint 用）。缓存为静态，避免每次重绘 new Font 泄漏 GDI 句柄。</summary>
+    public static readonly Font TitleFont = new("Microsoft YaHei UI", 11f, FontStyle.Bold, GraphicsUnit.Point);
+
+    /// <summary>
+    /// 按需创建字体。调用方负责释放：若在 OnPaint 中使用，必须 using 或改用上面的静态缓存字体。
+    /// </summary>
     public static Font Font(float size, FontStyle style = FontStyle.Regular)
         => new("Microsoft YaHei UI", size, style, GraphicsUnit.Point);
 

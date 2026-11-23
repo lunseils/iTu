@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -90,6 +92,9 @@ public static class OcrService
         var result = new List<OcrLine>();
         if (string.IsNullOrWhiteSpace(json)) return result;
 
+        // 脚本拿到的是放大后的图，坐标必须换算回原图，否则翻译写回会整体偏移。
+        double inv = 1.0 / GetOcrScale(bitmap.Width, bitmap.Height);
+
         try
         {
             using var doc = System.Text.Json.JsonDocument.Parse(json);
@@ -100,16 +105,23 @@ public static class OcrService
                 var text = item.TryGetProperty("t", out var t) ? t.GetString() : null;
                 if (string.IsNullOrWhiteSpace(text)) continue;
 
-                int x = GetInt(item, "x"), y = GetInt(item, "y");
-                int w = GetInt(item, "w"), h = GetInt(item, "h");
+                // x/y 必须留在 [0, Size-1]：若取到 Size，则下面的 (Size - x) 变成 0，
+                // Math.Clamp(w, 1, 0) 会因 min>max 抛 ArgumentException（贴边行框高频触发）。
+                int maxX = Math.Max(0, bitmap.Width - 1);
+                int maxY = Math.Max(0, bitmap.Height - 1);
+                int x = Math.Clamp((int)Math.Round(GetInt(item, "x") * inv), 0, maxX);
+                int y = Math.Clamp((int)Math.Round(GetInt(item, "y") * inv), 0, maxY);
+                int w = Math.Clamp((int)Math.Round(GetInt(item, "w") * inv), 1, bitmap.Width - x);
+                int h = Math.Clamp((int)Math.Round(GetInt(item, "h") * inv), 1, bitmap.Height - y);
                 if (w <= 0 || h <= 0) continue;
 
-                result.Add(new OcrLine(NormalizeCjkSpacing(text!.Trim()), new Rectangle(x, y, w, h)));
+                result.Add(new OcrLine(NormalizeOcrText(text!.Trim()), new Rectangle(x, y, w, h)));
             }
         }
-        catch (System.Text.Json.JsonException)
+        catch (Exception ex)
         {
-            // 脚本异常输出时不让整条链路失败
+            // 脚本异常输出或任何畸形坐标都不让整条 OCR 链路崩溃，记录后返回已解析部分。
+            Log.Info("[ocr] 解析行框失败（已跳过异常行）: " + ex.Message);
             return result;
         }
 
@@ -221,9 +233,34 @@ public static class OcrService
         => item.TryGetProperty(name, out var v) && v.TryGetInt32(out var i) ? i : 0;
 
     /// <summary>
-    /// WinRT OCR 对中文会按字切分并插入空格（"截 编 辑 器"），
-    /// 这里去掉汉字之间的空格，恢复成正常词组，提升译文质量。
+    /// 规范化本地 OCR 文本：WinRT 会把中文按字切分并在标点两侧塞空格，
+    /// 这里在保留中英混排必要空格的同时把这些噪声清掉。
     /// </summary>
+    private static string NormalizeOcrText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return text;
+
+        string s = NormalizeCjkSpacing(text.Replace('\u3000', ' ').Trim());
+        var parts = s.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        s = string.Join(' ', parts);
+
+        var sb = new StringBuilder(s.Length);
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            if (c == ' ')
+            {
+                char prev = sb.Length > 0 ? sb[^1] : '\0';
+                char next = i + 1 < s.Length ? s[i + 1] : '\0';
+                // 标点前不保留空格，开引号/括号后也不保留空格
+                if (NoSpaceBefore(next) || NoSpaceAfter(prev)) continue;
+            }
+            sb.Append(c);
+        }
+        return sb.ToString().Trim();
+    }
+
+    /// <summary>WinRT OCR 对中文会按字切分并插入空格（"截 编 辑 器"），这里恢复成正常词组。</summary>
     private static string NormalizeCjkSpacing(string text)
     {
         if (text.Length < 3) return text;
@@ -242,25 +279,147 @@ public static class OcrService
         return sb.ToString();
     }
 
+    private static bool NoSpaceBefore(char c) =>
+        "，。、；：？！）》」』】〉…·,.!?;:)]}".IndexOf(c) >= 0;
+
+    private static bool NoSpaceAfter(char c) =>
+        "（《「『【〈([{".IndexOf(c) >= 0;
+
     private static bool IsCjk(char c) =>
         (c >= 0x4E00 && c <= 0x9FFF) ||   // 基本汉字
         (c >= 0x3400 && c <= 0x4DBF) ||   // 扩展 A
         (c >= 0x3000 && c <= 0x303F) ||   // CJK 标点
         (c >= 0xFF00 && c <= 0xFFEF);     // 全角符号
 
+    /// <summary>
+    /// 按 OCR 包围盒重建文本排版：同一水平行的文字拼成一行，缩进与行间距按坐标还原。
+    /// 在线 OCR 只有整图兜底坐标时不使用，避免把每行都当成标题缩进。
+    /// </summary>
+    public static string BuildLayoutText(IReadOnlyList<OcrLine>? lines, int imageWidth, int imageHeight)
+    {
+        if (lines == null || lines.Count == 0) return string.Empty;
+        var valid = lines.Where(l => l != null && !string.IsNullOrWhiteSpace(l.Text)).ToList();
+        if (valid.Count == 0) return string.Empty;
+
+        bool hasRealBoxes = valid.Any(l => l.Bounds.X != 0 || l.Bounds.Y != 0 ||
+                                           l.Bounds.Width < imageWidth || l.Bounds.Height < imageHeight);
+        if (!hasRealBoxes) return string.Join(Environment.NewLine, valid.Select(l => l.Text));
+
+        var heights = valid.Select(l => (double)l.Bounds.Height).Where(h => h > 0).OrderBy(h => h).ToList();
+        double lineH = Math.Max(8, heights.Count > 0 ? heights[heights.Count / 2] : 20);
+        double charW = Math.Max(4, lineH * 0.55);
+        int left = valid.Min(l => l.Bounds.Left);
+
+        var sorted = valid.OrderBy(l => l.Bounds.Top).ThenBy(l => l.Bounds.Left).ToList();
+        var rows = new List<List<OcrLine>>();
+        foreach (var line in sorted)
+        {
+            double centerY = line.Bounds.Top + line.Bounds.Height / 2.0;
+            var row = rows.LastOrDefault(r =>
+            {
+                double rowCenter = r[0].Bounds.Top + r[0].Bounds.Height / 2.0;
+                return Math.Abs(rowCenter - centerY) <= lineH * 0.65;
+            });
+            if (row == null)
+            {
+                rows.Add(new List<OcrLine> { line });
+            }
+            else
+            {
+                row.Add(line);
+            }
+        }
+
+        var sb = new StringBuilder();
+        (int Top, int Bottom)? previous = null;
+        foreach (var row in rows)
+        {
+            if (previous.HasValue)
+            {
+                double gap = row.Min(l => l.Bounds.Top) - previous.Value.Bottom;
+                if (gap > lineH * 1.2) sb.AppendLine();
+                if (gap > lineH * 2.6) sb.AppendLine();
+            }
+
+            var ordered = row.OrderBy(l => l.Bounds.Left).ToList();
+            int indent = Math.Clamp((int)Math.Round((ordered.Min(l => l.Bounds.Left) - left) / charW), 0, 16);
+            sb.Append(' ', indent);
+
+            for (int i = 0; i < ordered.Count; i++)
+            {
+                sb.Append(ordered[i].Text);
+                if (i + 1 >= ordered.Count) continue;
+
+                var current = ordered[i].Bounds;
+                var next = ordered[i + 1].Bounds;
+                int gapX = next.Left - current.Right;
+                if (gapX > charW * 0.7)
+                    sb.Append(' ', Math.Min(8, (int)Math.Round(gapX / charW)));
+                else if (NeedsSpace(ordered[i].Text, ordered[i + 1].Text))
+                    sb.Append(' ');
+            }
+
+            sb.AppendLine();
+            previous = (ordered.Min(l => l.Bounds.Top), ordered.Max(l => l.Bounds.Bottom));
+        }
+
+        return sb.ToString().TrimEnd();
+    }
+
+    private static bool NeedsSpace(string leftText, string rightText)
+    {
+        if (string.IsNullOrEmpty(leftText) || string.IsNullOrEmpty(rightText)) return false;
+        char a = leftText[^1], b = rightText[0];
+        if (char.IsWhiteSpace(a) || char.IsWhiteSpace(b)) return false;
+        if (NoSpaceBefore(b) || NoSpaceAfter(a)) return false;
+        if (IsCjk(a) && IsCjk(b)) return false;
+        return true;
+    }
+
+    /// <summary>
+    /// 小字截图直接送 WinRT OCR 识别率很差。按目标像素尺寸自适应放大（上限 3 倍），
+    /// 识别坐标再按同一比例缩回原图。
+    /// </summary>
+    private static double GetOcrScale(int width, int height)
+    {
+        if (width <= 0 || height <= 0) return 1.0;
+        double scale = Math.Max(2200.0 / width, 1200.0 / height);
+        return Math.Clamp(scale, 1.0, 3.0);
+    }
+
     private static async Task<string> RunAsync(Bitmap bitmap, bool lines)
     {
-        // 脚本来自 exe 内嵌资源；这里只需把图片落到临时 PNG 供 WinRT 读取。
+        // 脚本来自 exe 内嵌资源；这里只需把预处理后的图片落到临时 PNG 供 WinRT 读取。
         var tempPath = Path.Combine(Path.GetTempPath(),
             "qqshot_ocr_" + Guid.NewGuid().ToString("N") + ".png");
+        Bitmap? ocrBitmap = null;
 
         try
         {
-            bitmap.Save(tempPath, ImageFormat.Png);
+            double scale = GetOcrScale(bitmap.Width, bitmap.Height);
+            Image source = bitmap;
+            if (scale > 1.01)
+            {
+                int w = Math.Max(1, (int)Math.Round(bitmap.Width * scale));
+                int h = Math.Max(1, (int)Math.Round(bitmap.Height * scale));
+                ocrBitmap = new Bitmap(w, h, PixelFormat.Format24bppRgb);
+                using var g = Graphics.FromImage(ocrBitmap);
+                g.Clear(Color.White);   // 透明像素按白底处理，避免 WinRT 把透明当黑色
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.CompositingQuality = CompositingQuality.HighQuality;
+                g.SmoothingMode = SmoothingMode.HighQuality;
+                g.DrawImage(bitmap, new Rectangle(0, 0, w, h),
+                            0, 0, bitmap.Width, bitmap.Height, GraphicsUnit.Pixel);
+                source = ocrBitmap;
+            }
+
+            source.Save(tempPath, ImageFormat.Png);
             return await RunPowerShellAsync(tempPath, lines);
         }
         finally
         {
+            ocrBitmap?.Dispose();
             try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { /* 忽略 */ }
         }
     }

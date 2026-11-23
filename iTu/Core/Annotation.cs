@@ -698,7 +698,7 @@ public sealed class TranslationAnnotation : Annotation
         _backdropCache?.Dispose();
         _backdropCache = null;
 
-        Bitmap bmp;
+        Bitmap? bmp = null;
         try
         {
             // 用非预乘的 32bppArgb：与画布目标格式一致，
@@ -731,6 +731,7 @@ public sealed class TranslationAnnotation : Annotation
         }
         catch
         {
+            bmp?.Dispose();   // 中途失败时释放已创建的位图，避免 GDI 句柄泄漏
             return null;
         }
 

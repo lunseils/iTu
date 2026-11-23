@@ -178,7 +178,7 @@ def erode(loop, dist):
 
 
 def emit(data, target):
-    L = ["using System.Drawing.Drawing2D;", "", "namespace QqShot.Ui;", "",
+    L = ["using System.Drawing.Drawing2D;", "", "namespace iTu.Ui;", "",
          "/// <summary>",
          "/// 旧版图标的**精确矢量复刻**（tools/vectorize_icons.py 生成，勿手改坐标）。",
          "/// 原图 alpha 高倍二值化 → 追踪外轮廓与内部洞 → 亚像素简化 → 归一化；",

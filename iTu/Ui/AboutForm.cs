@@ -141,7 +141,7 @@ public sealed class AboutForm : Form
             g.DrawPath(pen, path);
 
         using (var brush = new SolidBrush(Theme.Text))
-            g.DrawString("关于 / 诊断", Theme.Font(11f, FontStyle.Bold), brush, 26, 14);
+            g.DrawString("关于 / 诊断", Theme.TitleFont, brush, 26, 14);
 
         base.OnPaint(e);
     }

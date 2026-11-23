@@ -184,13 +184,32 @@ internal static class Program
             return marker;
         }
 
-        // 2) 老版本可能没有标记文件：用窗口标题兜底，并从窗口反查 PID
+        // 2) 老版本可能没有标记文件：用窗口标题兜底，并从窗口反查 PID。
+        // 必须同时读取该 PID 的真实路径与启动时间：如果只给 PID 却把路径写成占位符，
+        // TryTerminate 会因无法校验而走 fail-open 分支直接 Kill——PID 被复用时会误杀无关进程。
         var hwnd = FindWindow(null, HotkeySinkTitle);
         if (hwnd != IntPtr.Zero)
         {
             GetWindowThreadProcessId(hwnd, out var pid);
             if (pid != 0 && pid != (uint)Environment.ProcessId)
-                return new InstanceInfo((int)pid, "未知（该实例未记录版本）", "(路径未知)", DateTime.MinValue);
+            {
+                string? path = null;
+                DateTime started = DateTime.MinValue;
+                try
+                {
+                    using var p = System.Diagnostics.Process.GetProcessById((int)pid);
+                    started = p.StartTime;
+                    path = p.MainModule?.FileName;
+                }
+                catch { /* 读不到身份信息 → 下方拒绝返回，避免无校验地结束进程 */ }
+
+                if (string.IsNullOrEmpty(path) || !System.IO.Path.IsPathFullyQualified(path))
+                {
+                    Log.Info($"[single] 窗口兜底命中 pid={pid} 但无法读取其可执行路径，忽略以免误杀");
+                    return null;
+                }
+                return new InstanceInfo((int)pid, "未知（该实例未记录版本）", path, started);
+            }
         }
 
         return null;

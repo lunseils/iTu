@@ -52,7 +52,8 @@ public sealed class HotkeyManager : IDisposable
     }
 
     internal static void Trace(Exception ex)
-        => System.Diagnostics.Debug.WriteLine("[iTu] " + ex);
+        // Debug.WriteLine 在 Release 构建里不可见，热键回调异常会被完全吞掉无法诊断。
+        => Log.Info("[hotkey] 回调异常: " + ex.Message);
 
     /// <summary>解析 "Ctrl+Alt+A" / "Ctrl+Shift+F2" 形式的组合键。</summary>
     public static bool TryParse(string combination, out uint modifiers, out uint virtualKey)

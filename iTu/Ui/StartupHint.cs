@@ -22,6 +22,17 @@ public sealed class StartupHint : Form
     private const int PadY = 16;
     private const int ShadowPad = 10;   // 画布上留给柔影的透明边
 
+    // 布局间距：测量与绘制必须共用同一组数值，否则文字会溢出卡片。
+    private const float TitleGap = 10f;
+    private const float RowGap = 8f;
+    private const float FootGap = 12f;
+    private const float KeyPadX = 16f;
+    private const float KeyPadY = 6f;
+    private const float LabelGap = 12f;
+
+    private const string TitleText = "iTu 快捷键";
+    private const string FootText = "点击托盘图标可进入设置";
+
     private static StartupHint? _current;
 
     private readonly System.Windows.Forms.Timer _dismiss;
@@ -85,7 +96,9 @@ public sealed class StartupHint : Form
     /// </summary>
     public static void ShowNearTray(AppSettings settings)
     {
-        var area = Screen.PrimaryScreen?.WorkingArea ?? Screen.PrimaryScreen!.WorkingArea;
+        // 原写法 `PrimaryScreen?.WorkingArea ?? PrimaryScreen!.WorkingArea` 两侧都依赖
+        // PrimaryScreen，无主屏时仍会抛 NullReferenceException；给一个真实兜底矩形。
+        var area = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1920, 1032);
         var size = MeasureSize(settings);
 
         // 托盘图标在任务栏最右侧，卡片紧贴任务栏顶边、靠右 8px
@@ -103,75 +116,120 @@ public sealed class StartupHint : Form
         _current = null;
     }
 
-    /// <summary>根据内容量出面板尺寸。</summary>
-    private static Size MeasureSize(AppSettings s)
+    /// <summary>根据内容量出面板尺寸（与实际绘制共用同一套布局）。</summary>
+    private static Size MeasureSize(AppSettings s) => ComputeLayout(s).Canvas;
+
+    /// <summary>
+    /// 渲染到独立位图。供分层窗口提交和预览工具共用，保证"看到的就是运行的"。
+    /// </summary>
+    public static Bitmap RenderToBitmap(AppSettings s)
     {
-        // 行：图标间距 + 快捷键文本；用三个热键里最宽的估算
-        var rows = new[] { s.CaptureHotkey, s.FullscreenHotkey, s.RecordHotkey };
-        int maxKey = 0;
-        foreach (var r in rows)
-            maxKey = Math.Max(maxKey, TextRenderer.MeasureText(r, Theme.UiFontBold).Width);
-
-        var title = TextRenderer.MeasureText("iTu 快捷键", Theme.UiFontBold);
-        var foot = TextRenderer.MeasureText("点击托盘图标可进入设置", Theme.SmallFont);
-
-        int contentW = Math.Max(maxKey + 132, Math.Max(title.Width, foot.Width));
-        int width = contentW + PadX * 2 + ShadowPad * 2;
-
-        // 标题(1) + 空行(0.6) + 三行快捷键(3) + 空行(0.6) + 脚注(1)
-        int rowH = TextRenderer.MeasureText("测", Theme.UiFont).Height;
-        int height = (int)(title.Height + rowH * 4.2f + foot.Height) + PadY * 2 + ShadowPad * 2;
-
-        return new Size(Math.Max(300, width), Math.Max(170, height));
+        var size = MeasureSize(s);
+        return LayeredSurface.Supersample(size, g => DrawContent(g, size, s));
     }
 
     private void Render(AppSettings s)
     {
         if (!IsHandleCreated || Width <= 0) return;
-
         var size = ClientSize;
-        using var bmp = LayeredSurface.Supersample(size, g =>
-        {
-            var card = new RectangleF(ShadowPad, ShadowPad,
-                size.Width - ShadowPad * 2, size.Height - ShadowPad * 2);
-
-            Theme.DrawSoftShadow(g, card, Radius, 8, 24);
-            Theme.FillRounded(g, card, Radius, Theme.Surface, Theme.Border);
-
-            float x = card.X + PadX;
-            float y = card.Y + PadY;
-
-            // 标题
-            using (var brush = new SolidBrush(Theme.Text))
-            {
-                g.DrawString("iTu 快捷键", Theme.UiFontBold, brush, x, y);
-            }
-            y += TextRenderer.MeasureText("测", Theme.UiFontBold).Height + 10;
-
-            // 三行快捷键
-            DrawRow(g, ref y, s.CaptureHotkey, "自由截图");
-            DrawRow(g, ref y, s.FullscreenHotkey, "全屏截图");
-            DrawRow(g, ref y, s.RecordHotkey, "屏幕录制");
-
-            y += 10;
-
-            // 脚注
-            using (var brush = new SolidBrush(Theme.TextMuted))
-            {
-                g.DrawString("点击托盘图标可进入设置", Theme.SmallFont, brush, x, y);
-            }
-        });
-
+        using var bmp = LayeredSurface.Supersample(size, g => DrawContent(g, size, s));
         LayeredSurface.Submit(Handle, bmp, Location);
     }
 
-    /// <summary>画一行「快捷键胶囊 + 功能名」。</summary>
-    private static void DrawRow(Graphics g, ref float y, string hotkey, string label)
-    {
-        var keySize = TextRenderer.MeasureText(hotkey, Theme.UiFontBold);
+    /// <summary>统一的布局：所有 y 坐标在测量阶段一次性算好，绘制时直接复用。</summary>
+    private sealed record HintLayout(
+        Size Canvas,
+        float X,
+        float TitleY,
+        float[] RowY,
+        float FootY,
+        float KeyW,
+        float KeyH,
+        float LabelX,
+        float LabelH,
+        string[] Hotkeys,
+        string[] Labels);
 
-        // 快捷键胶囊
-        var keyRect = new RectangleF(ShadowPad + PadX, y, keySize.Width + 16, keySize.Height + 6);
+    private static HintLayout ComputeLayout(AppSettings s)
+    {
+        // 用 GDI+ 度量（与 DrawString 一致）。旧版用 TextRenderer(GDI) 估算，
+        // 行高比 DrawString 小，脚注被挤到卡片外 —— 这是"文字标签在页外"的根因。
+        using var scratch = new Bitmap(1, 1);
+        using var g = Graphics.FromImage(scratch);
+
+        string[] hotkeys = { s.CaptureHotkey, s.FullscreenHotkey, s.RecordHotkey };
+        string[] labels = { "自由截图", "全屏截图", "屏幕录制" };
+
+        var titleSz = g.MeasureString(TitleText, Theme.UiFontBold);
+        var footSz = g.MeasureString(FootText, Theme.SmallFont);
+
+        float maxKeyW = 0, maxKeyH = 0;
+        foreach (var hk in hotkeys)
+        {
+            var sz = g.MeasureString(hk, Theme.UiFontBold);
+            maxKeyW = Math.Max(maxKeyW, sz.Width);
+            maxKeyH = Math.Max(maxKeyH, sz.Height);
+        }
+        float keyW = maxKeyW + KeyPadX;
+        float keyH = maxKeyH + KeyPadY;
+
+        float labelH = 0, maxLabelW = 0;
+        foreach (var lb in labels)
+        {
+            var sz = g.MeasureString(lb, Theme.UiFont);
+            labelH = Math.Max(labelH, sz.Height);
+            maxLabelW = Math.Max(maxLabelW, sz.Width);
+        }
+
+        float x = ShadowPad + PadX;
+        float titleY = ShadowPad + PadY;
+        float y = titleY + titleSz.Height + TitleGap;
+
+        var rowY = new float[hotkeys.Length];
+        for (int i = 0; i < rowY.Length; i++)
+        {
+            rowY[i] = y;
+            y += keyH + RowGap;
+        }
+        float footY = y + (FootGap - RowGap);
+        float bottom = footY + footSz.Height;
+
+        float right = Math.Max(x + titleSz.Width,
+                        Math.Max(x + footSz.Width,
+                                 x + keyW + LabelGap + maxLabelW));
+
+        int width = (int)Math.Ceiling(right + PadX + ShadowPad);
+        int height = (int)Math.Ceiling(bottom + PadY + ShadowPad);
+
+        return new HintLayout(
+            new Size(Math.Max(300, width), Math.Max(160, height)),
+            x, titleY, rowY, footY, keyW, keyH,
+            x + keyW + LabelGap, labelH, hotkeys, labels);
+    }
+
+    private static void DrawContent(Graphics g, Size size, AppSettings s)
+    {
+        var card = new RectangleF(ShadowPad, ShadowPad,
+            size.Width - ShadowPad * 2, size.Height - ShadowPad * 2);
+
+        Theme.DrawSoftShadow(g, card, Radius, 8, 24);
+        Theme.FillRounded(g, card, Radius, Theme.Surface, Theme.Border);
+
+        var L = ComputeLayout(s);
+        using (var brush = new SolidBrush(Theme.Text))
+            g.DrawString(TitleText, Theme.UiFontBold, brush, L.X, L.TitleY);
+
+        for (int i = 0; i < L.RowY.Length; i++)
+            DrawRow(g, L, i);
+
+        using (var brush = new SolidBrush(Theme.TextMuted))
+            g.DrawString(FootText, Theme.SmallFont, brush, L.X, L.FootY);
+    }
+
+    /// <summary>画一行「快捷键胶囊 + 功能名」。</summary>
+    private static void DrawRow(Graphics g, HintLayout L, int i)
+    {
+        var keyRect = new RectangleF(L.X, L.RowY[i], L.KeyW, L.KeyH);
         Theme.FillRounded(g, keyRect, 6, Theme.AccentSoft, Theme.Border);
 
         using var keyBrush = new SolidBrush(Theme.Accent);
@@ -180,13 +238,10 @@ public sealed class StartupHint : Form
             Alignment = StringAlignment.Center,
             LineAlignment = StringAlignment.Center
         };
-        g.DrawString(hotkey, Theme.UiFontBold, keyBrush, keyRect, fmt);
+        g.DrawString(L.Hotkeys[i], Theme.UiFontBold, keyBrush, keyRect, fmt);
 
-        // 功能名
         using var labelBrush = new SolidBrush(Theme.Text);
-        g.DrawString(label, Theme.UiFont, labelBrush,
-            keyRect.Right + 12, y + (keyRect.Height - Theme.UiFont.Height) / 2f);
-
-        y += keyRect.Height + 8;
+        g.DrawString(L.Labels[i], Theme.UiFont, labelBrush,
+            L.LabelX, L.RowY[i] + (L.KeyH - L.LabelH) / 2f);
     }
 }

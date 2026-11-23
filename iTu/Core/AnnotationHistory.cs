@@ -13,12 +13,19 @@ public sealed class AnnotationHistory
     public bool CanUndo => _undo.Count > 0;
     public bool CanRedo => _redo.Count > 0;
 
+    /// <summary>释放一组标注的懒加载 GDI 缓存（Clone 不共享这些缓存，可安全释放）。</summary>
+    private static void Release(IEnumerable<Annotation> items)
+    {
+        foreach (var a in items) a.ReleaseCachedResources();
+    }
+
     /// <summary>提交一次修改（调用前先 Undo 前状态已入栈）。</summary>
     public void Push(IReadOnlyList<Annotation> next)
     {
         _undo.Add(Current.Select(a => a.Clone()).ToList());
         if (_undo.Count > 200) _undo.RemoveAt(0);
         _redo.Clear();
+        Release(Current);   // 旧 Current 已 Clone 入栈，其 GDI 缓存不再需要
         Current = next.Select(a => a.Clone()).ToList();
     }
 
@@ -26,6 +33,7 @@ public sealed class AnnotationHistory
     {
         if (!CanUndo) return false;
         _redo.Add(Current.Select(a => a.Clone()).ToList());
+        Release(Current);
         Current = _undo[^1].Select(a => a.Clone()).ToList();
         _undo.RemoveAt(_undo.Count - 1);
         return true;
@@ -35,6 +43,7 @@ public sealed class AnnotationHistory
     {
         if (!CanRedo) return false;
         _undo.Add(Current.Select(a => a.Clone()).ToList());
+        Release(Current);
         Current = _redo[^1].Select(a => a.Clone()).ToList();
         _redo.RemoveAt(_redo.Count - 1);
         return true;
@@ -46,6 +55,8 @@ public static class ImageUtil
     /// <summary>按模板生成文件名，支持 {date} {time} {n}。</summary>
     public static string BuildFileName(string pattern, string extension)
     {
+        // settings.json 被手动改成 null 时不要抛 NRE（外层虽会 catch，但这里直接兜底更稳）。
+        pattern ??= "截图_{date}_{time}";
         var now = DateTime.Now;
         var name = pattern
             .Replace("{date}", now.ToString("yyyyMMdd"))

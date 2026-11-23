@@ -186,17 +186,26 @@ public static class ScreenCapture
             if (hdcScreen != IntPtr.Zero) Native.ReleaseDC(IntPtr.Zero, hdcScreen);
         }
 
-        if (!ok)
+        try
         {
-            using var fallback = Graphics.FromImage(bmp);
-            fallback.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, bmp.Size, CopyPixelOperation.SourceCopy);
+            if (!ok)
+            {
+                using var fallback = Graphics.FromImage(bmp);
+                fallback.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, bmp.Size, CopyPixelOperation.SourceCopy);
+                return bmp;
+            }
+
+            // BitBlt 只保证 RGB，屏幕 DC 的 alpha 字节是 0，这里统一补成不透明，
+            // 否则后续 GDI+ 合成会把它当成全透明图。
+            ForceOpaque(bmp);
             return bmp;
         }
-
-        // BitBlt 只保证 RGB，屏幕 DC 的 alpha 字节是 0，这里统一补成不透明，
-        // 否则后续 GDI+ 合成会把它当成全透明图。
-        ForceOpaque(bmp);
-        return bmp;
+        catch
+        {
+            // 回退抓屏或像素处理失败时释放已创建的位图，避免异常路径泄漏全屏 GDI 位图。
+            bmp.Dispose();
+            throw;
+        }
     }
 
     /// <summary>把 32bpp 位图的 alpha 通道全部置为不透明。</summary>

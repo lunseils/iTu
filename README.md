@@ -4,7 +4,7 @@
 [![.NET](https://img.shields.io/badge/.NET-10-512BD4.svg)](https://dotnet.microsoft.com/)
 
 一个 Windows 桌面截图工具，复刻 QQ 截图工具的核心交互体验。
-可选接入大模型：在线识图使用 **DeepSeek-OCR**，翻译可使用 **Hunyuan-MT-7B**，识别与译文均原位写回截图。
+可选接入大模型：在线识图使用 **DeepSeek-OCR**，翻译可使用 **Hunyuan-MT-7B**；识图结果弹出可复制的双栏面板，译文原位写回截图。
 
 > 工程目录名为 `iTu`，产物名是 `iTu.exe`。
 
@@ -44,7 +44,7 @@
 
 | 功能 | 实现方式 |
 |---|---|
-| 🔍 文字提取（OCR） | 默认走硅基流动 **DeepSeek-OCR** 大模型；未配置 Key 或失败时回退系统 WinRT `OcrEngine`（PowerShell 5.1，中英文）。结果按行采样背景色擦原文、按原图字号重写，同时复制到剪贴板 |
+| 🔍 文字提取（OCR） | 默认走硅基流动 **DeepSeek-OCR** 大模型；未配置 Key 或失败时回退系统 WinRT `OcrEngine`（PowerShell 5.1，中英文）。识别后弹出双栏结果面板：左侧原图可缩放/拖动/滚轮缩放，右侧文字按原图排版重建、可选中复制并支持一键复制；本地 OCR 优先简体中文引擎并自动放大预处理，同时保留自动复制到剪贴板，不修改原截图 |
 | 🌐 翻译 | 可切换硅基流动 **Hunyuan-MT-7B** 翻译大模型；免配置模式走 MyMemory / Google 公共端点。译文直接写回选区画面，字号对齐原图 |
 | 🎬 屏幕录制 | 区域录制 → GIF（内置编码器）/ MP4（ffmpeg）；支持暂停/继续、取消、Esc 停止 |
 
@@ -52,7 +52,7 @@
 
 | 能力 | 模型 / 服务 | 说明 |
 |---|---|---|
-| 在线识图 | `deepseek-ai/DeepSeek-OCR`（硅基流动） | 多模态 OCR 大模型，适合复杂版面与中英混排；逐行结果原位写回截图并复制到剪贴板 |
+| 在线识图 | `deepseek-ai/DeepSeek-OCR`（硅基流动） | 多模态 OCR 大模型，适合复杂版面与中英混排；逐行结果在双栏面板中展示，可选中复制并一键复制 |
 | 在线翻译 | `tencent/Hunyuan-MT-7B`（硅基流动） | 通过 OpenAI 兼容接口调用，译文按原文字号与位置替换 |
 | 免配置回退 | WinRT OCR + MyMemory / Google | 不填 API Key 也能用；识图失败自动回退本地 WinRT |
 | 凭证安全 | API Key + HTTPS 白名单 | 接口地址仅允许 SiliconFlow 官方 HTTPS 域名，防止密钥被自定义端点外发 |

@@ -18,19 +18,29 @@ public static class ResultWriter
             // 圆角/阴影图含透明像素，JPEG/BMP 会把透明区编码成黑角。
             // 遇到透明图一律改存 PNG，保留透明四角。
             bool transparent = ImageUtil.HasTransparency(image);
-            var (ext, format) = transparent
-                ? (".png", ImageFormat.Png)
+            var ext = transparent
+                ? ".png"
                 : settings.ImageFormat switch
                 {
-                    ImageFormatKind.Jpeg => (".jpg", ImageFormat.Jpeg),
-                    ImageFormatKind.Bmp => (".bmp", ImageFormat.Bmp),
-                    _ => (".png", ImageFormat.Png)
+                    ImageFormatKind.Jpeg => ".jpg",
+                    ImageFormatKind.Bmp => ".bmp",
+                    _ => ".png"
                 };
 
             path = ImageUtil.EnsureUniquePath(
                 Path.Combine(dir, ImageUtil.BuildFileName(settings.FileNamePattern, ext)));
 
-            image.Save(path, format);
+            // 与 ImageUtil.Save 保持一致：JPEG 用 92 质量编码器，避免默认质量(~75)导致的画质差异。
+            var codec = ImageUtil.SelectCodec(transparent
+                ? ImageFormatKind.Png
+                : settings.ImageFormat);
+            using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write))
+            using (var enc = new EncoderParameters(1))
+            {
+                if (!transparent && settings.ImageFormat == ImageFormatKind.Jpeg)
+                    enc.Param[0] = new EncoderParameter(Encoder.Quality, 92L);
+                image.Save(fs, codec, enc);
+            }
 
             Log.Info($"[save] {path}");
             return true;

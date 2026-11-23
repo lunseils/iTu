@@ -1,20 +1,23 @@
-# iTu 文字提取脚本（Windows 内置 OCR，无需第三方依赖）
+# iTu OCR script (Windows built-in OCR, no third-party dependency)
 #
-# 用法:
-#   powershell -NoProfile -ExecutionPolicy Bypass -File ocr.ps1 -Path <图片路径>
-#       输出：识别到的整段文本
-#   powershell -NoProfile -ExecutionPolicy Bypass -File ocr.ps1 -Path <图片路径> -Lines
-#       输出：JSON 数组，每项为该行的文本与包围盒 { t, x, y, w, h }
-#             （供「翻译叠加」按原位置回填译文）
-#   iTu.exe 内嵌本脚本，运行时用 -EncodedCommand 执行，参数经环境变量 ITU_OCR_PATH /
-#       ITU_OCR_LINES 传入（脚本不落盘，发布目录只需一个 exe）。
+# Usage:
+#   powershell -NoProfile -ExecutionPolicy Bypass -File ocr.ps1 -Path <image>
+#       Output: recognized plain text
+#   powershell -NoProfile -ExecutionPolicy Bypass -File ocr.ps1 -Path <image> -Lines
+#       Output: JSON array of { t, x, y, w, h } for each recognized line
+#   iTu.exe embeds this script and runs it via -EncodedCommand. Arguments are
+#   passed through ITU_OCR_PATH / ITU_OCR_LINES environment variables.
+#
+# NOTE: Keep this file ASCII-only. Windows PowerShell 5.1 reads BOM-less UTF-8
+# as ANSI (GBK on Chinese systems); multibyte comments can swallow following
+# newlines and silently comment out code (this caused a real OCR failure).
 
 param(
     [string]$Path,
     [switch]$Lines
 )
 
-# 内嵌执行（-EncodedCommand）时没有命令行参数，从环境变量补齐。
+# EncodedCommand mode has no command-line arguments.
 if ([string]::IsNullOrEmpty($Path)) { $Path = $env:ITU_OCR_PATH }
 if ($env:ITU_OCR_LINES -eq '1') { $Lines = $true }
 if ([string]::IsNullOrEmpty($Path)) {
@@ -25,14 +28,20 @@ if ([string]::IsNullOrEmpty($Path)) {
 $ErrorActionPreference = 'Stop'
 
 try {
+    # WinRT StorageFile.GetFileFromPathAsync requires native backslash paths.
+    $ImagePath = [System.IO.Path]::GetFullPath($Path).Replace([char]47, [char]92)
+
     Add-Type -AssemblyName System.Runtime.WindowsRuntime | Out-Null
 
     $null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]
     $null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
     $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType = WindowsRuntime]
     $null = [Windows.Storage.Streams.IRandomAccessStream, Windows.Foundation, ContentType = WindowsRuntime]
+    # Without this projection, [Windows.Globalization.Language] throws
+    # "Unable to find type" and the whole recognition process fails.
+    $null = [Windows.Globalization.Language, Windows.Globalization, ContentType = WindowsRuntime]
 
-    # 取出 AsTask<T> 的泛型方法，用于等待 WinRT 异步操作
+    # Generic AsTask<T> used to await WinRT async operations.
     $asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
             $_.Name -eq 'AsTask' -and
             $_.GetParameters().Count -eq 1 -and
@@ -45,20 +54,26 @@ try {
         $task.Result
     }
 
-    $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($Path)) ([Windows.Storage.StorageFile])
+    $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($ImagePath)) ([Windows.Storage.StorageFile])
     $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
     $decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
     $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
 
-    $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
-    if ($null -eq $engine) {
-        $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage(
-            [Windows.Globalization.Language]::new('zh-Hans'))
+    # Prefer Simplified Chinese engine; user profile language may be English,
+    # which badly fragments Chinese text. Fall back silently when unavailable.
+    $engine = $null
+    try {
+        $lang = [Windows.Globalization.Language]::new('zh-Hans')
+        $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($lang)
+    } catch {
+        $engine = $null
     }
     if ($null -eq $engine) {
-        # 不能用 Write-Error：$ErrorActionPreference='Stop' 下它会抛异常，
-        # 直接进入外层 catch → exit 1，导致 C# 端针对 exit 2 的
-        # "未安装 OCR 语言包"友好提示永远不可达。这里直接写 stderr 并以 2 退出。
+        $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+    }
+    if ($null -eq $engine) {
+        # Do NOT use Write-Error: under ErrorActionPreference=Stop it throws and
+        # turns into exit 1, making the C# exit-code-2 friendly hint unreachable.
         [Console]::Error.WriteLine('NO_OCR_ENGINE')
         exit 2
     }
@@ -67,7 +82,6 @@ try {
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
     if ($Lines) {
-        # 逐行输出文本 + 包围盒（Word 的 BoundingRect 并集即整行范围）
         $rows = New-Object System.Collections.ArrayList
         foreach ($line in $result.Lines) {
             $text = $line.Text
@@ -92,7 +106,7 @@ try {
                 h = [int][math]::Round($maxY - $minY)
             })
         }
-        # PowerShell 5.1 的 ConvertTo-Json 不支持 -AsArray，手工拼数组保证格式稳定
+        # ConvertTo-Json -AsArray is not available in PowerShell 5.1.
         $items = @($rows | ForEach-Object { $_ | ConvertTo-Json -Compress })
         Write-Output ('[' + ($items -join ',') + ']')
         exit 0
@@ -102,6 +116,8 @@ try {
     exit 0
 }
 catch {
-    Write-Error $_.Exception.Message
+    $msg = $_.Exception.Message
+    if ($_.Exception.InnerException) { $msg += ' | ' + $_.Exception.InnerException.Message }
+    [Console]::Error.WriteLine('OCR_ERROR: ' + $msg)
     exit 1
 }
