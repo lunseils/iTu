@@ -9,8 +9,8 @@ namespace iTu.Core;
 /// 屏幕文字翻译。
 ///
 /// 两条链路：
-///   · Builtin      —— 公共翻译端点（Google，失败回退 MyMemory），免配置；
-///   · OpenSourceAi —— OpenAI 兼容接口，可接本地 Ollama / LM Studio / vLLM 等开源模型。
+///   · Builtin     —— 公共翻译端点（Google，失败回退 MyMemory），免配置；
+///   · SiliconFlow —— 硅基流动混元翻译大模型（Hunyuan-MT-7B），OpenAI 兼容接口。
 ///
 /// 速度优化（关键）：
 ///   1. 去重：同一批里重复的行只翻译一次；
@@ -62,9 +62,12 @@ public static class TranslateService
             int count = Math.Min(MaxLinesPerRequest, unique.Count - start);
             var slice = unique.GetRange(start, count);
 
-            string[]? part = settings.TranslateProvider == TranslateProvider.OpenSourceAi
-                ? await TryTranslateWithAiAsync(slice, settings, ct)
-                : await TryTranslateBuiltinBatchAsync(slice, settings.TranslateTarget, ct);
+            string[]? part = settings.TranslateProvider switch
+            {
+                TranslateProvider.SiliconFlow =>
+                    await TryTranslateWithSiliconFlowAsync(slice, settings, ct),
+                _ => await TryTranslateBuiltinBatchAsync(slice, settings.TranslateTarget, ct),
+            };
 
             // ---- 3) 批量失败则逐行回退 ----
             part ??= await TranslatePerLineAsync(slice, settings, ct);
@@ -88,16 +91,20 @@ public static class TranslateService
         return await TranslateWithFallbackAsync(text, targetLang, CancellationToken.None);
     }
 
-    // ---------------- 开源 AI（OpenAI 兼容） ----------------
+    // ---------------- 硅基流动 Hunyuan-MT-7B ----------------
 
-    private static async Task<string[]?> TryTranslateWithAiAsync(
+    /// <summary>
+    /// 硅基流动混元翻译大模型（tencent/Hunyuan-MT-7B）。
+    /// OpenAI 兼容 chat/completions，批量编号行翻译，输出逐行译文。
+    /// </summary>
+    private static async Task<string[]?> TryTranslateWithSiliconFlowAsync(
         List<string> lines, AppSettings s, CancellationToken ct)
     {
         try
         {
-            var baseUrl = string.IsNullOrWhiteSpace(s.AiBaseUrl)
-                ? "http://127.0.0.1:11434/v1"
-                : s.AiBaseUrl.TrimEnd('/');
+            // 端点必须过白名单：非法/被篡改的地址会让 Bearer APIKey 外发。
+            var baseUrl = AppSettings.ValidateSiliconFlowBaseUrl(s.SiliconFlowBaseUrl)
+                          ?? "https://api.siliconflow.cn/v1";
 
             var lang = DescribeLanguage(s.TranslateTarget);
 
@@ -107,7 +114,8 @@ public static class TranslateService
 
             var payload = new
             {
-                model = string.IsNullOrWhiteSpace(s.AiModel) ? "qwen2.5:7b" : s.AiModel,
+                model = string.IsNullOrWhiteSpace(s.SiliconFlowTranslateModel)
+                    ? "tencent/Hunyuan-MT-7B" : s.SiliconFlowTranslateModel,
                 temperature = 0.2,
                 stream = false,
                 messages = new object[]
@@ -116,7 +124,7 @@ public static class TranslateService
                     {
                         role = "system",
                         content =
-                            $"你是翻译引擎。把用户给出的每一条编号行翻译成{lang}。" +
+                            $"你是专业翻译引擎。把用户给出的每一条编号行翻译成{lang}。" +
                             $"必须输出且仅输出 {lines.Count} 行，每行保持原有编号和 '. ' 前缀，" +
                             "不要解释、不要合并、不要增删条目。"
                     },
@@ -125,14 +133,14 @@ public static class TranslateService
             };
 
             using var req = new HttpRequestMessage(HttpMethod.Post, baseUrl + "/chat/completions");
-            if (!string.IsNullOrWhiteSpace(s.AiApiKey))
-                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", s.AiApiKey);
+            if (!string.IsNullOrWhiteSpace(s.SiliconFlowApiKey))
+                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", s.SiliconFlowApiKey);
             req.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
 
             using var resp = await Http.SendAsync(req, ct);
             if (!resp.IsSuccessStatusCode)
             {
-                Log.Info($"[translate] AI 接口返回 {(int)resp.StatusCode}");
+                Log.Info($"[translate] 硅基流动接口返回 {(int)resp.StatusCode}");
                 return null;
             }
 
@@ -146,13 +154,13 @@ public static class TranslateService
 
             var parsed = ParseNumbered(content, lines.Count);
             if (parsed == null)
-                Log.Info("[translate] AI 输出行数不匹配，回退逐行翻译");
+                Log.Info("[translate] 硅基流动输出行数不匹配，回退逐行翻译");
 
             return parsed;
         }
         catch (Exception ex)
         {
-            Log.Info("[translate] AI 翻译失败: " + ex.Message);
+            Log.Info("[translate] 硅基流动翻译失败: " + ex.Message);
             return null;
         }
     }
@@ -376,21 +384,21 @@ public static class TranslateService
     {
         var arr = new string[lines.Count];
 
-        // AI 模式逐行会非常慢，并发度更保守
-        int concurrency = settings.TranslateProvider == TranslateProvider.OpenSourceAi ? 2 : FallbackConcurrency;
-
-        using var gate = new SemaphoreSlim(concurrency);
+        using var gate = new SemaphoreSlim(FallbackConcurrency);
         var tasks = lines.Select(async (text, i) =>
         {
             await gate.WaitAsync(ct);
             try
             {
-                arr[i] = settings.TranslateProvider == TranslateProvider.OpenSourceAi
-                    ? (await TryTranslateWithAiAsync(new List<string> { text }, settings, ct))?[0] ?? text
+                arr[i] = settings.TranslateProvider == TranslateProvider.SiliconFlow
+                    ? (await TryTranslateWithSiliconFlowAsync(new List<string> { text }, settings, ct))?[0] ?? text
                     : await TranslateWithFallbackAsync(text, settings.TranslateTarget, ct);
             }
-            catch
+            catch (Exception ex)
             {
+                // 逐行翻译失败时保留原文，但要留下日志，便于区分"服务失败"
+                // 与"本来就没译文"（否则用户看到原文还以为翻译成功）。
+                Log.Info($"[translate] 第 {i + 1} 行翻译失败，保留原文: {ex.Message}");
                 arr[i] = text;
             }
             finally

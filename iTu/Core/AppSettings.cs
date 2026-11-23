@@ -7,17 +7,10 @@ public sealed class AppSettings
 {
     private const string ProductName = "iTu";
 
-    /// <summary>旧产品名，仅用于首次运行时迁移历史配置。</summary>
-    private const string LegacyName = "iTu";
-
     private static readonly string Dir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), ProductName);
 
     private static readonly string FilePath = Path.Combine(Dir, "settings.json");
-
-    private static readonly string LegacyFilePath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        LegacyName, "settings.json");
 
     private static readonly JsonSerializerOptions Opts = new()
     {
@@ -29,10 +22,10 @@ public sealed class AppSettings
     public string CaptureHotkey { get; set; } = "Ctrl+Alt+A";
 
     /// <summary>全屏截图热键（不框选，直接抓整块虚拟桌面）。</summary>
-    public string FullscreenHotkey { get; set; } = "Ctrl+Shift+F";
+    public string FullscreenHotkey { get; set; } = "Ctrl+Alt+S";
 
     /// <summary>屏幕录制热键。</summary>
-    public string RecordHotkey { get; set; } = "Ctrl+Alt+S";
+    public string RecordHotkey { get; set; } = "Ctrl+Shift+F";
 
     /// <summary>截图后默认动作。</summary>
     public SaveBehavior AfterCapture { get; set; } = SaveBehavior.CopyToClipboard;
@@ -74,36 +67,48 @@ public sealed class AppSettings
     /// <summary>翻译引擎。</summary>
     public TranslateProvider TranslateProvider { get; set; } = TranslateProvider.Builtin;
 
+    /// <summary>硅基流动 API Key（用于 Hunyuan-MT-7B 在线翻译与 DeepSeek-OCR 在线识别）。</summary>
+    public string SiliconFlowApiKey { get; set; } = "";
+
+    /// <summary>硅基流动接口地址（OpenAI 兼容）。</summary>
+    public string SiliconFlowBaseUrl { get; set; } = "https://api.siliconflow.cn/v1";
+
+    /// <summary>硅基流动翻译模型（混元翻译大模型）。</summary>
+    public string SiliconFlowTranslateModel { get; set; } = "tencent/Hunyuan-MT-7B";
+
+    /// <summary>硅基流动在线识别模型（DeepSeek-OCR 专用 OCR 大模型）。</summary>
+    public string SiliconFlowOcrModel { get; set; } = "deepseek-ai/DeepSeek-OCR";
+
+    /// <summary>识图引擎（手动选择）。</summary>
+    public OcrProvider OcrProvider { get; set; } = OcrProvider.DeepSeekOcr;
+
     /// <summary>
-    /// 开源 AI 翻译的接口地址（OpenAI 兼容）。
-    /// 默认指向本机 Ollama；也可填 LM Studio / vLLM / 自建网关。
+    /// 硅基流动接口地址白名单校验：只允许 HTTPS 且主机为官方域名。
+    /// 自定义 baseUrl 若被篡改为攻击者端点，请求携带的 Authorization(Bearer APIKey)
+    /// 会被外发，因此这里强制约束，防止凭证泄露。返回 null 表示使用默认值。
     /// </summary>
-    public string AiBaseUrl { get; set; } = "http://127.0.0.1:11434/v1";
-
-    /// <summary>开源 AI 翻译使用的模型名。</summary>
-    public string AiModel { get; set; } = "qwen2.5:7b";
-
-    /// <summary>接口密钥（本地服务通常留空）。</summary>
-    public string AiApiKey { get; set; } = "";
+    public static string? ValidateSiliconFlowBaseUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return null;
+        if (!Uri.TryCreate(url.TrimEnd('/'), UriKind.Absolute, out var uri)) return null;
+        if (uri.Scheme != Uri.UriSchemeHttps) return null;
+        var host = uri.Host;
+        if (string.Equals(host, "api.siliconflow.cn", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(host, "api.siliconflow.com", StringComparison.OrdinalIgnoreCase))
+            return uri.GetLeftPart(UriPartial.Path).TrimEnd('/');
+        return null;
+    }
 
     public static AppSettings Load()
     {
         try
         {
-            // 新路径优先；首次升级时从旧产品目录迁移，避免用户配置丢失
-            var path = File.Exists(FilePath) ? FilePath
-                     : File.Exists(LegacyFilePath) ? LegacyFilePath
-                     : null;
-
-            if (path != null)
+            // 配置项零散缺失时，System.Text.Json 会用属性初始值填补，
+            // 因此新增设置项无需迁移逻辑，直接反序列化即可。
+            if (File.Exists(FilePath))
             {
-                var loaded = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path), Opts);
-                if (loaded != null)
-                {
-                    // 发现来自旧路径，立刻写到新位置，下次直接命中
-                    if (path == LegacyFilePath) loaded.Save();
-                    return loaded;
-                }
+                var loaded = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath), Opts);
+                if (loaded != null) return loaded;
             }
         }
         catch
@@ -154,6 +159,16 @@ public enum TranslateProvider
     /// <summary>内置在线接口（免配置，逐行/批量走公共翻译端点）。</summary>
     Builtin,
 
-    /// <summary>开源 AI 模型（OpenAI 兼容接口，如本地 Ollama / LM Studio）。</summary>
-    OpenSourceAi
+    /// <summary>硅基流动（SiliconFlow）混元翻译大模型 Hunyuan-MT-7B。</summary>
+    SiliconFlow
+}
+
+/// <summary>识图引擎。</summary>
+public enum OcrProvider
+{
+    /// <summary>硅基流动在线 DeepSeek-OCR 专用 OCR 大模型。</summary>
+    DeepSeekOcr,
+
+    /// <summary>系统自带 WinRT OCR 引擎（免配置，翻译原位替换的精确坐标来源）。</summary>
+    LocalWinRT
 }

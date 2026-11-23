@@ -1,4 +1,5 @@
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.Drawing.Text;
 
 namespace iTu.Ui;
@@ -109,6 +110,14 @@ public static class Theme
     public static Font Font(float size, FontStyle style = FontStyle.Regular)
         => new("Microsoft YaHei UI", size, style, GraphicsUnit.Point);
 
+    /// <summary>
+    /// 圆角矩形路径（半径自动夹到短边一半）。
+    ///
+    /// 复刻 ituk 的 QPainterPath::addRoundedRect：用贝塞尔曲线（kappa≈0.5523）
+    /// 精确近似四段 1/4 圆弧，而非 GDI+ 的 AddArc。AddArc 在弧线两端与直线段
+    /// 的衔接处抗锯齿采样不对称，小圆角时会在四角留下肉眼可见的台阶/毛刺；
+    /// 贝塞尔构造的圆弧曲率连续、四角完全对称，配合超采样后边缘更平滑。
+    /// </summary>
     public static GraphicsPath RoundedRect(RectangleF r, float radius)
     {
         var path = new GraphicsPath();
@@ -119,12 +128,25 @@ public static class Theme
         }
 
         radius = Math.Min(radius, Math.Min(r.Width, r.Height) / 2f);
-        float d = radius * 2f;
+        float x = r.X, y = r.Y, w = r.Width, h = r.Height, k = radius * 0.5522847498f;
 
-        path.AddArc(r.X, r.Y, d, d, 180, 90);
-        path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
-        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-        path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        path.StartFigure();
+        // 左上 → 右上（顶部直线）
+        path.AddLine(x + radius, y, x + w - radius, y);
+        // 右上角圆弧
+        path.AddBezier(x + w - radius, y, x + w - radius + k, y, x + w, y + radius - k, x + w, y + radius);
+        // 右侧直线
+        path.AddLine(x + w, y + radius, x + w, y + h - radius);
+        // 右下角圆弧
+        path.AddBezier(x + w, y + h - radius, x + w, y + h - radius + k, x + w - radius + k, y + h, x + w - radius, y + h);
+        // 底部直线
+        path.AddLine(x + w - radius, y + h, x + radius, y + h);
+        // 左下角圆弧
+        path.AddBezier(x + radius, y + h, x + radius - k, y + h, x, y + h - radius + k, x, y + h - radius);
+        // 左侧直线
+        path.AddLine(x, y + h - radius, x, y + radius);
+        // 左上角圆弧
+        path.AddBezier(x, y + radius, x, y + radius - k, x + radius - k, y, x + radius, y);
         path.CloseFigure();
         return path;
     }
@@ -195,6 +217,57 @@ public static class Theme
         g.InterpolationMode = InterpolationMode.HighQualityBicubic;
         g.PixelOffsetMode = PixelOffsetMode.HighQuality;
         g.CompositingQuality = CompositingQuality.HighQuality;
+    }
+
+    /// <summary>
+    /// 超采样绘制：把一块小控件放大 factor 倍画进临时位图，再高质量缩小贴回。
+    ///
+    /// 复刻 ituk 的 style::paintSupersampled。圆角 / 柔影这类"边缘全是曲线"的图形，
+    /// 直接在 1:1 上用 GDI+ 的 SmoothingMode.AntiAlias（8x4 网格）仍会留下台阶感，
+    /// 尤其在高 DPI 或缩放显示时更明显。先放大绘制再缩小，等于把采样密度提高 factor 倍，
+    /// 圆角弧线会明显更连续、更平滑。
+    ///
+    /// <param name="target">目标 Graphics（通常已在主位图上，且已 translate 到控件原点）。</param>
+    /// <param name="bounds">控件逻辑区域（本地坐标，从 0,0 起）。</param>
+    /// <param name="draw">在放大后的 Graphics 上执行的绘制（坐标仍按 bounds 逻辑坐标）。</param>
+    /// <param name="factor">超采样倍数（2 = 2x2）。</param>
+    /// <param name="margin">四周边距（像素），用于容纳柔影等向外扩散的内容。</param>
+    /// </summary>
+    public static void DrawSupersampled(Graphics target, Rectangle bounds,
+        Action<Graphics> draw, int factor = 2, int margin = 8)
+    {
+        if (bounds.Width <= 0 || bounds.Height <= 0) return;
+        int f = Math.Max(1, factor);
+        int m = Math.Max(0, margin);
+
+        int bigW = (bounds.Width + 2 * m) * f;
+        int bigH = (bounds.Height + 2 * m) * f;
+        using var big = new Bitmap(bigW, bigH, PixelFormat.Format32bppPArgb);
+        using (var g = Graphics.FromImage(big))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            g.PixelOffsetMode = PixelOffsetMode.Half;
+            // 先放大 f 倍、再平移 margin：GDI+ 里后调用的 ScaleTransform 作用于
+            // 世界坐标之后，TranslateTransform 的 margin 会被放大（实测逻辑(0,0)
+            // 落到物理 (m*f, m*f)），这样四周各留 m*f 像素给柔影外扩。
+            g.ScaleTransform(f, f);
+            g.TranslateTransform(m, m);
+            draw(g);
+        }
+
+        var oldInterp = target.InterpolationMode;
+        var oldPixel = target.PixelOffsetMode;
+        var oldComp = target.CompositingQuality;
+        target.InterpolationMode = InterpolationMode.HighQualityBicubic;
+        target.PixelOffsetMode = PixelOffsetMode.Half;
+        target.CompositingQuality = CompositingQuality.HighQuality;
+        target.DrawImage(big,
+            new Rectangle(bounds.X - m, bounds.Y - m, bounds.Width + 2 * m, bounds.Height + 2 * m),
+            0, 0, bigW, bigH, GraphicsUnit.Pixel);
+        target.InterpolationMode = oldInterp;
+        target.PixelOffsetMode = oldPixel;
+        target.CompositingQuality = oldComp;
     }
 
     public static Color Mix(Color a, Color b, float t)

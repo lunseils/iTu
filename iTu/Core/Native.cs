@@ -46,7 +46,6 @@ internal static class Native
     public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 
     // ---- 鼠标事件 ----
-    public const uint MOUSEEVENTF_WHEEL = 0x0800;
     public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     public const uint MOUSEEVENTF_LEFTUP = 0x0004;
     public const uint MOUSEEVENTF_MOVE = 0x0001;
@@ -68,24 +67,6 @@ internal static class Native
         public int Bottom;
         public int Width => Right - Left;
         public int Height => Bottom - Top;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct MOUSEINPUT
-    {
-        public int dx;
-        public int dy;
-        public uint mouseData;
-        public uint dwFlags;
-        public uint time;
-        public IntPtr dwExtraInfo;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct INPUT
-    {
-        public uint type;
-        public MOUSEINPUT mi;
     }
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -130,9 +111,6 @@ internal static class Native
     /// <summary>窥探消息队列中是否有待处理消息（不取出）。</summary>
     [DllImport("user32.dll")]
     public static extern bool PeekMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
-
-    [DllImport("user32.dll")]
-    public static extern bool SetCursorPos(int x, int y);
 
     /// <summary>查询键的物理按下状态（用于拖拽兜底判定，不依赖 MouseUp 消息）。</summary>
     [DllImport("user32.dll")]
@@ -272,9 +250,6 @@ internal static class Native
     public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out RECT rect, int size);
 
     [DllImport("user32.dll")]
-    public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
-
-    [DllImport("user32.dll")]
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
     [DllImport("user32.dll")]
@@ -310,56 +285,4 @@ internal static class Native
 
     [DllImport("user32.dll")]
     public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-    /// <summary>在当前鼠标位置模拟滚轮滚动。</summary>
-    /// <summary>
-    /// 在指定屏幕坐标处滚动。
-    ///
-    /// 走过的坑：
-    ///   1. 只发 SendInput 时，如果目标窗口没有焦点（例如焦点停留在我们自己的工具窗上），
-    ///      滚动消息会被丢掉 —— 表现为滚不动、第一步就判"到底"。
-    ///   2. 改成向该点下的窗口 PostMessage 也不行：PostMessage 到子窗口**不会向父控件冒泡**，
-    ///      而滚动逻辑通常在父容器上，于是照样不动。
-    ///
-    /// 现在的做法：光标移到该点 → 把该点所属的顶层窗口拿到前台（放弃我们自己的焦点）
-    /// → 发真实滚轮输入。真实输入会按 WinForms 的规则沿父链冒泡，能滚的控件自然会响应。
-    /// </summary>
-    public static void ScrollWheelAt(Point screenPoint, int delta)
-    {
-        SetCursorPos(screenPoint.X, screenPoint.Y);
-
-        var hwnd = WindowFromPoint(new POINT { X = screenPoint.X, Y = screenPoint.Y });
-        if (hwnd != IntPtr.Zero)
-        {
-            var root = GetAncestor(hwnd, GA_ROOT);
-            if (root != IntPtr.Zero) SetForegroundWindow(root);
-        }
-
-        Thread.Sleep(30);
-
-        // 滚轮按"格"归一：不够一格（120）的增量，WinForms 等控件会直接忽略，
-        // 表现为"发了滚轮但页面纹丝不动"。
-        if (delta != 0 && Math.Abs(delta) < 120)
-            delta = Math.Sign(delta) * 120;
-
-        ScrollWheel(delta);
-    }
-
-    public static void ScrollWheel(int delta)
-    {
-        var input = new INPUT
-        {
-            type = 0,
-            mi = new MOUSEINPUT
-            {
-                dwFlags = MOUSEEVENTF_WHEEL,
-                mouseData = unchecked((uint)delta),
-                dx = 0,
-                dy = 0,
-                time = 0,
-                dwExtraInfo = IntPtr.Zero
-            }
-        };
-        SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>());
-    }
 }

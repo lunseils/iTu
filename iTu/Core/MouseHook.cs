@@ -41,6 +41,13 @@ public sealed class MouseHook : IDisposable
     private IntPtr _hook;
     private bool _disposed;
 
+    // 低级钩子回调对耗时极敏感（超时会被系统静默摘链）。
+    // _inCallback 防止嵌套消息泵导致同一钩子重入（例如订阅者里弹模态框时）；
+    // 同时记录单次回调耗时，超过阈值写日志，便于定位钩子栈上的重活。
+    private bool _inCallback;
+    private const long SlowCallbackMs = 40;
+    private long _slowCallbackWarned;
+
     public bool IsInstalled => _hook != IntPtr.Zero;
 
     /// <summary>已分发的鼠标事件计数（诊断用：为 0 说明钩子没收到任何输入）。</summary>
@@ -62,8 +69,12 @@ public sealed class MouseHook : IDisposable
 
     private IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode >= 0 && !_disposed)
+        if (nCode >= 0 && !_disposed && !_inCallback)
         {
+            // 防重入：嵌套消息泵（模态框）会在同一钩子上重入；此时订阅者状态机
+            // 尚未处理完上一事件，重入只会带来错乱。直接放过，交回 CallNextHookEx。
+            _inCallback = true;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
                 var info = Marshal.PtrToStructure<Native.MSLLHOOKSTRUCT>(lParam);
@@ -86,7 +97,20 @@ public sealed class MouseHook : IDisposable
                 // 但也不能完全静默——写日志便于确认"事件到了但处理炸了"。
                 Log.Info("[hook] 回调异常: " + ex.Message);
             }
+            finally
+            {
+                sw.Stop();
+                // 采样告警：首次超时 + 之后每隔一段记录一次，避免刷屏。
+                if (sw.ElapsedMilliseconds >= SlowCallbackMs &&
+                    _slowCallbackWarned + 5000 < Environment.TickCount64)
+                {
+                    _slowCallbackWarned = Environment.TickCount64;
+                    Log.Info($"[hook] 回调耗时 {sw.ElapsedMilliseconds}ms（钩子栈上有重活，可能被系统摘链）");
+                }
+                _inCallback = false;
+            }
         }
+        // 无论是否处理，都必须立刻把事件交还给钩子链，避免拖慢全系统输入。
         return Native.CallNextHookEx(_hook, nCode, wParam, lParam);
     }
 

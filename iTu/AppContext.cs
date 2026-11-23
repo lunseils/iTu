@@ -13,9 +13,21 @@ public sealed class AppContext : ApplicationContext
     private readonly HotkeyManager _hotkeys = new();
     private readonly NotifyIcon _tray;
 
+    /// <summary>UI 线程的同步上下文：后台任务完成后用它把回调投递回 UI 线程。</summary>
+    private readonly System.Threading.SynchronizationContext? _uiContext;
+
 
     public AppContext()
     {
+        // Application.Run 之前，WinForms 的同步上下文可能尚未安装到本线程，
+        // SynchronizationContext.Current 会是 null。若就此保存 null，后台截图线程
+        // 的 BeginInvokeSafe 会退化成 action() 直接在后台线程执行，操作托盘/Toast
+        // 等 UI 元素将抛跨线程异常。这里主动创建并安装一个绑定到当前 UI 线程的
+        // WindowsFormsSynchronizationContext（未安装时才装），确保回投目标可靠。
+        if (System.Threading.SynchronizationContext.Current == null)
+            System.Threading.SynchronizationContext.SetSynchronizationContext(
+                new WindowsFormsSynchronizationContext());
+        _uiContext = System.Threading.SynchronizationContext.Current;
         BuildTray();
 
         _tray = new NotifyIcon
@@ -41,11 +53,25 @@ public sealed class AppContext : ApplicationContext
         Log.Info($"[app] 已启动 {AppInfo.VersionText} pid={Environment.ProcessId} " +
                  $"热键={_settings.CaptureHotkey}/{_settings.FullscreenHotkey}/{_settings.RecordHotkey} 日志={Log.FilePath}");
 
-        // 托盘程序启动后没有任何界面，用一条气泡提示就够。
-        // 旧版还会额外弹一个 340×232 的"启动提示面板"（置顶 6 秒），
-        // 结果用户按快捷键截图时它正好被拍进画面，成了"右上角多余的窗口"。
-
+        // 启动后弹一个快捷键提醒面板（置顶 5 秒自动淡出，不抢焦点）。
+        // 与旧版的关键区别：截图抓屏前会先 CloseHint 关掉它，且面板用
+        // WS_EX_NOACTIVATE + WS_EX_TRANSPARENT 分层窗口，不会再被拍进截图里。
         _tray.ShowBalloonTip(3000, "iTu", "截图工具已启动，按 " + _settings.CaptureHotkey + " 截图", ToolTipIcon.Info);
+        ShowStartupHint();
+    }
+
+    /// <summary>在屏幕右上角显示快捷键提醒面板。</summary>
+    private void ShowStartupHint()
+    {
+        try
+        {
+            // 在任务栏图标（系统托盘）上方显示，而不是屏幕右上角。
+            Ui.StartupHint.ShowNearTray(_settings);
+        }
+        catch (Exception ex)
+        {
+            Log.Info("[startup] 启动提醒显示失败: " + ex.Message);
+        }
     }
 
     /// <summary>
@@ -246,8 +272,8 @@ public sealed class AppContext : ApplicationContext
             sb.AppendLine($"　　　　　{marker.ExePath}");
         }
 
-        MessageBox.Show(sb.ToString(), "iTu 关于 / 诊断",
-            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        using var form = new Ui.AboutForm(sb.ToString());
+        form.ShowDialog();
     }
 
     /// <summary>用记事本打开日志（没有 .log 关联时也能看）。</summary>
@@ -281,9 +307,6 @@ public sealed class AppContext : ApplicationContext
             if (key == null) return;
 
             const string ValueName = "iTu";
-            const string LegacyValueName = "iTu";   // 旧产品名，升级时清理
-
-            if (key.GetValue(LegacyValueName) != null) key.DeleteValue(LegacyValueName);
 
             if (_settings.RunOnStartup)
             {
@@ -341,11 +364,18 @@ public sealed class AppContext : ApplicationContext
         CaptureRegion(mode);
     }
 
+    /// <summary>
+    /// 后台线程里的截图会话句柄：会话跑完（或取消）后需要复位，
+    /// 防止会话对象在后台线程还没结束时就被 GC / 复用。
+    /// </summary>
+    private int _captureSessions;
+
     private void CaptureRegion(CaptureMode mode)
     {
-        // 抓屏前先收掉自己的浮动提示：它们是 TopMost 的独立窗口，
+        // 抓屏前先收掉自己的浮动提示与启动提醒：它们是 TopMost 的独立窗口，
         // 留在屏幕上就会被拍进画面（就是"截图里多出来一个窗口"的根源之一）。
         Ui.Toast.CloseAll();
+        Ui.StartupHint.CloseHint();
         var settleUntil = Environment.TickCount64 + 80;
         while (Environment.TickCount64 < settleUntil)
         {
@@ -353,23 +383,73 @@ public sealed class AppContext : ApplicationContext
             Thread.Sleep(10);
         }
 
-        using var session = new OverlaySession(_settings, mode);
-        bool ok = session.Run(mode);
+        // 截图会话在**后台线程**运行：主线程的 Safe()/_busy 立即复位，
+        // 于是截图遮罩层打开时，再按一次快捷键能立刻再开一个并发会话。
+        // 每个会话各自独立的消息循环 + 独立遮罩层，互不阻塞。
+        // 但并发数必须设上限：连按热键可开任意多个全屏浮层，耗尽资源且输入互相打架。
+        const int MaxCaptureSessions = 3;
+        if (Volatile.Read(ref _captureSessions) >= MaxCaptureSessions)
+        {
+            Log.Info($"[capture] 并发截图已达上限 {MaxCaptureSessions}，忽略本次触发");
+            return;
+        }
+        Interlocked.Increment(ref _captureSessions);
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                // System.Windows.Forms.Timer（输入轮询）与窗体的 BeginInvoke
+                // 需要 WindowsFormsSynchronizationContext 才在后台线程正常工作。
+                if (SynchronizationContext.Current == null)
+                    SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
 
+                var session = new OverlaySession(_settings, mode);
+                bool ok = session.Run(mode);
+                var result = session.Result;
+                var recordRequested = session.RecordRequested;
+                var saveRequested = session.SaveRequested;
+                var pinRequested = session.PinRequested;
+                var shareRequested = session.ShareRequested;
+                var selection = session.Selection;
+                session.Dispose();
+
+                // 收尾必须回 UI 线程：托盘气泡、Toast、PinWindow、分享菜单都绑定主线程
+                BeginInvokeSafe(() => FinishCapture(
+                    ok, result, recordRequested, saveRequested, pinRequested, shareRequested, selection));
+            }
+            catch (Exception ex)
+            {
+                Log.Info("[capture] 后台截图会话异常: " + ex);
+                BeginInvokeSafe(() => Toast.Show(null, "截图失败：" + ex.Message, Theme.Danger));
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _captureSessions);
+            }
+        })
+        { IsBackground = true, Name = "iTu.CaptureSession" };
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+    }
+
+    /// <summary>后台截图会话结束后的收尾（UI 线程执行）。</summary>
+    private void FinishCapture(bool ok, Bitmap? img, bool recordRequested, bool saveRequested,
+        bool pinRequested, bool shareRequested, Rectangle selection)
+    {
         // 顶部功能条上点了「录屏」：本次截图会话只是"让出舞台"，
         // 接着走录制流程（录制自己会再框一次区域）。
-        if (session.RecordRequested)
+        if (recordRequested)
         {
-            session.Result?.Dispose();
+            img?.Dispose();
             StartRecording();
             return;
         }
 
-        if (!ok || session.Result is not { } img) return;
+        if (!ok || img == null) return;
 
         // 顶部功能条的「全屏截图」也是走这条路：选区 = 整块虚拟桌面。
         // 顶部功能条的"保存"：直接写文件
-        if (session.SaveRequested)
+        if (saveRequested)
         {
             using (img)
             {
@@ -380,7 +460,7 @@ public sealed class AppContext : ApplicationContext
         }
 
         // 钉在桌面：直接钉出
-        if (session.PinRequested)
+        if (pinRequested)
         {
             var pin = new Ui.PinWindow(img);   // PinWindow 接管位图所有权
             pin.Show();
@@ -389,9 +469,9 @@ public sealed class AppContext : ApplicationContext
         }
 
         // 分享：弹出分享菜单
-        if (session.ShareRequested)
+        if (shareRequested)
         {
-            ShowShareForImage(img, session.Selection);
+            ShowShareForImage(img, selection);
             return;
         }
 
@@ -416,6 +496,7 @@ public sealed class AppContext : ApplicationContext
     private void CaptureFullScreen()
     {
         Ui.Toast.CloseAll();
+        Ui.StartupHint.CloseHint();
         var settleUntil = Environment.TickCount64 + 80;
         while (Environment.TickCount64 < settleUntil)
         {
@@ -450,7 +531,10 @@ public sealed class AppContext : ApplicationContext
             ShowInTaskbar = false,
             StartPosition = FormStartPosition.Manual,
             Size = new Size(1, 1),
-            Opacity = 0,
+            // 用 TransparencyKey 做全透明而非 Opacity=0：后者在部分 DWM 环境下
+            // 句柄/命中行为异常，前者是 WinForms 隐藏宿主窗口的标准做法。
+            BackColor = Color.Magenta,
+            TransparencyKey = Color.Magenta,
             Location = new Point(anchor.Left, anchor.Top)
         };
         host.Show();
@@ -473,6 +557,23 @@ public sealed class AppContext : ApplicationContext
     // Safe() 的 _busy 只覆盖到异步任务"启动"为止；录制/OCR 的实际工作在后台继续，
     // 需要各自的长流程标志，防止热键二次触发开出第二个录制器/OCR 会话。
     private int _recordingRunning;
+
+    /// <summary>把回调投递回 UI 线程（后台线程改 UI 会抛异常）。</summary>
+    private void BeginInvokeSafe(Action action)
+    {
+        try
+        {
+            var ctx = _uiContext;
+            if (ctx != null)
+                ctx.Post(_ => action(), null);
+            else
+                action();
+        }
+        catch (Exception ex)
+        {
+            Log.Info("[app] UI 投递失败: " + ex.Message);
+        }
+    }
 
     /// <summary>当前在录的录制面板（null 表示没有录制）。热键/托盘再次触发 = 停止它。</summary>
     private RecordPanel? _recordPanel;

@@ -27,13 +27,33 @@ public sealed record InstanceInfo(int Pid, string Version, string ExePath, DateT
 /// </summary>
 public static class AppInfo
 {
-    private const string InstanceFileName = "qqshot.instance";
+    // 标记文件名带当前用户 SID 的短哈希：同一台机器上多用户会话共用临时目录，
+    // 通用文件名会互相串扰（A 用户的标记被 B 用户读到 → 误判版本冲突）。
+    private static readonly string InstanceFileName =
+        "itu-" + StableHash(Environment.UserName) + ".instance";
+
+    private static string StableHash(string s)
+    {
+        unchecked
+        {
+            uint h = 2166136261;
+            foreach (char c in s)
+            {
+                h ^= c;
+                h *= 16777619;
+            }
+            return h.ToString("x8");
+        }
+    }
 
     /// <summary>程序版本（取自程序集版本，发布时由 csproj 的 Version 决定）。</summary>
     public static string Version { get; } = ResolveVersion();
 
     /// <summary>带前缀的版本号，用于日志与托盘提示。</summary>
     public static string VersionText => "v" + Version;
+
+    /// <summary>项目在 GitHub 上的地址。</summary>
+    public const string GitHubUrl = "https://github.com/lunseils/iTu";
 
     /// <summary>当前进程的可执行文件完整路径。</summary>
     public static string ExePath { get; } =
@@ -136,17 +156,28 @@ public static class AppInfo
                 return false;
             }
 
-            // 校验路径，避免 PID 复用导致误杀（旧版本没写标记时路径未知，跳过校验）
+            // 校验路径，避免 PID 复用导致误杀。
+            // 关键：标记里记录了目标路径（knownPath）却读不到实际进程路径时，
+            // 绝不能跳过校验直接 Kill——那正是权限不足/受保护进程下误杀同 PID
+            // 复用进程的通道。此时改为拒绝并给出明确原因。
             string? path = null;
-            try { path = p.MainModule?.FileName; } catch { /* 权限不足时忽略 */ }
+            try { path = p.MainModule?.FileName; } catch { /* 权限不足 → 下面按"无法校验"处理 */ }
 
             bool knownPath = !string.IsNullOrEmpty(info.ExePath) && Path.IsPathFullyQualified(info.ExePath);
-            if (knownPath && !string.IsNullOrEmpty(path) &&
-                !string.Equals(path, info.ExePath, StringComparison.OrdinalIgnoreCase))
+            if (knownPath)
             {
-                error = "PID 已被其它程序复用，已取消";
-                return false;
+                if (string.IsNullOrEmpty(path))
+                {
+                    error = "无法读取目标进程路径以校验 PID 复用，已取消结束操作（请到任务管理器手动结束）";
+                    return false;
+                }
+                if (!string.Equals(path, info.ExePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    error = "PID 已被其它程序复用，已取消";
+                    return false;
+                }
             }
+            // knownPath=false：旧版本标记没写路径，无校验依据，维持原行为（信任标记直接结束）
 
             p.Kill();
             if (!p.WaitForExit(3000))

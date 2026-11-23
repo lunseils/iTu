@@ -52,10 +52,16 @@ public static class ImageUtil
             .Replace("{time}", now.ToString("HHmmss"))
             .Replace("{n}", now.ToString("fff"));
 
+        // 过滤文件系统非法字符，并额外移除路径分隔符/控制字符，确保模板无法
+        // 拼出 "..\" 之类跳出保存目录的路径（用户可在设置里自定义模板）。
         foreach (var c in Path.GetInvalidFileNameChars())
             name = name.Replace(c, '_');
+        name = name.Replace('/', '_').Replace('\\', '_');
+        name = new string(name.Select(ch => char.IsControl(ch) ? '_' : ch).ToArray());
+        name = name.Trim(' ', '.');
 
         if (string.IsNullOrWhiteSpace(name)) name = "截图_" + now.ToString("yyyyMMdd_HHmmss");
+        if (name.Length > 120) name = name[..120];
         if (!name.EndsWith(extension, StringComparison.OrdinalIgnoreCase))
             name += extension;
         return name;
@@ -97,6 +103,11 @@ public static class ImageUtil
     public static string Save(Bitmap bmp, string directory, string pattern, ImageFormatKind format)
     {
         var dir = EnsureDirectory(directory);
+
+        // 圆角/阴影图含透明像素：强制改存 PNG 保留透明四角，
+        // 避免 JPEG/BMP 把透明区编码成黑角。
+        if (HasTransparency(bmp)) format = ImageFormatKind.Png;
+
         var ext = format switch
         {
             ImageFormatKind.Jpeg => ".jpg",
@@ -107,6 +118,7 @@ public static class ImageUtil
         var path = EnsureUniquePath(Path.Combine(dir, BuildFileName(pattern, ext)));
         var codec = SelectCodec(format);
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write);
+
         if (format == ImageFormatKind.Jpeg)
         {
             using var enc = new EncoderParameters(1);
@@ -133,8 +145,17 @@ public static class ImageUtil
             _ => ImageFormatKind.Png
         };
 
+        // 圆角/阴影图含透明像素：用户指定了 jpg/bmp 后缀时改回 png 后缀，
+        // 保留透明四角，避免编码成黑角。
+        if (HasTransparency(bmp) && format != ImageFormatKind.Png)
+        {
+            path = Path.ChangeExtension(path, ".png");
+            format = ImageFormatKind.Png;
+        }
+
         var codec = SelectCodec(format);
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write);
+
         if (format == ImageFormatKind.Jpeg)
         {
             using var enc = new EncoderParameters(1);
@@ -145,6 +166,38 @@ public static class ImageUtil
         {
             bmp.Save(fs, codec, null);
         }
+    }
+
+    /// <summary>位图是否含透明像素（alpha &lt; 255）。</summary>
+    public static bool HasTransparency(Bitmap bmp)
+    {
+        if (bmp.PixelFormat is System.Drawing.Imaging.PixelFormat.Format32bppArgb
+            or System.Drawing.Imaging.PixelFormat.Format32bppPArgb)
+        {
+            var data = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height),
+                System.Drawing.Imaging.ImageLockMode.ReadOnly,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            try
+            {
+                int stride = data.Stride;
+                int h = bmp.Height;
+                // 抽检 alpha 字节（BGRA 的 +3 偏移），步长 16 足够发现大片透明角
+                for (int y = 0; y < h; y += 16)
+                {
+                    IntPtr row = data.Scan0 + y * stride;
+                    for (int x = 0; x < bmp.Width; x += 16)
+                    {
+                        if (System.Runtime.InteropServices.Marshal.ReadByte(row, x * 4 + 3) < 255)
+                            return true;
+                    }
+                }
+            }
+            finally
+            {
+                bmp.UnlockBits(data);
+            }
+        }
+        return false;
     }
 
     public static ImageCodecInfo SelectCodec(ImageFormatKind format) => format switch

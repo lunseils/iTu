@@ -4,7 +4,7 @@ namespace iTu.Ui;
 
 /// <summary>
 /// 截图态顶部居中的功能条（对照参考图二）：左侧六点拖动柄，然后是
-/// 「截图 / 录屏 / 长截图」，一条竖分隔线，右边是「○ 隐藏当前窗口」。
+/// 「截图 / 录屏」，一条竖分隔线，右边是「○ 隐藏当前窗口」。
 ///
 /// 和胶囊、次级胶囊、颜色弹层一样，它是**纯手绘对象**，画进 <see cref="OverlayForm"/>
 /// 的同一张分层位图，命中也由 <see cref="OverlaySession"/> 统一分发 —— 没有独立窗口，
@@ -26,7 +26,6 @@ public sealed class QuickBar
         None = 0,
         Capture,
         Record,
-        LongShot,
 
         /// <summary>「隐藏当前窗口」前面的圆圈 —— 现在它是**选择框**：点它只隐藏功能条自己。</summary>
         HideBar
@@ -64,7 +63,7 @@ public sealed class QuickBar
     private bool _hoverDots;
     private int _hoverMenu = -1;
 
-    /// <summary>条下方的一行状态提示（"长截图暂未支持" 等）。</summary>
+    /// <summary>条下方的一行状态提示。</summary>
     private string? _status;
     private long _statusUntil;
 
@@ -108,9 +107,8 @@ public sealed class QuickBar
 
         var labels = new (Btn Btn, string Text)[]
         {
-            (Btn.Capture, "截图"),
-            (Btn.Record, "录屏"),
-            (Btn.LongShot, "长截图"),
+            (Btn.Capture, "自由截图"),
+            (Btn.Record, "屏幕录制"),
         };
 
         int x = PadX;
@@ -505,9 +503,8 @@ public sealed class QuickBar
 
     private static string LabelOf(Btn btn) => btn switch
     {
-        Btn.Capture => "截图",
-        Btn.Record => "录屏",
-        Btn.LongShot => "长截图",
+        Btn.Capture => "自由截图",
+        Btn.Record => "屏幕录制",
         _ => ""
     };
 

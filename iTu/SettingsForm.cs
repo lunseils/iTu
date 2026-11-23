@@ -26,9 +26,13 @@ public sealed class SettingsForm : Form
 
     private readonly ComboBox _cmbTranslateEngine = new();
     private readonly ComboBox _cmbTranslateTarget = new();
-    private readonly TextBox _txtAiBaseUrl = new();
-    private readonly TextBox _txtAiModel = new();
-    private readonly Label _aiTip = new();
+
+    private readonly TextBox _txtSfApiKey = new();
+    private readonly TextBox _txtSfBaseUrl = new();
+    private readonly TextBox _txtSfTranslateModel = new();
+    private readonly Label _sfTip = new();
+    private readonly ComboBox _cmbOcrEngine = new();
+    private readonly TextBox _txtSfOcrModel = new();
 
     /// <summary>自绘标题栏高度（无边框窗口自己没有标题栏）。</summary>
     private const int TitleHeight = 46;
@@ -151,7 +155,7 @@ public sealed class SettingsForm : Form
 
         Section("截图后行为");
 
-        foreach (var c in new[] { _cmbAfter, _cmbFormat, _cmbRecord, _cmbTranslateEngine, _cmbTranslateTarget })
+        foreach (var c in new[] { _cmbAfter, _cmbFormat, _cmbRecord, _cmbTranslateEngine, _cmbTranslateTarget, _cmbOcrEngine })
             c.Width = 240;
 
         _cmbAfter.DropDownStyle = ComboBoxStyle.DropDownList;
@@ -210,9 +214,12 @@ public sealed class SettingsForm : Form
         Section("翻译");
 
         _cmbTranslateEngine.DropDownStyle = ComboBoxStyle.DropDownList;
-        _cmbTranslateEngine.Items.AddRange(new object[] { "内置在线翻译（免配置）", "开源 AI（OpenAI 兼容接口）" });
-        _cmbTranslateEngine.SelectedIndex = (int)_settings.TranslateProvider;
-        _cmbTranslateEngine.SelectedIndexChanged += (_, _) => SyncAiFields();
+        _cmbTranslateEngine.Items.AddRange(new object[]
+        {
+            "内置在线翻译（免配置）",
+            "硅基流动（Hunyuan-MT-7B）"
+        });
+        _cmbTranslateEngine.SelectedIndex = Math.Clamp((int)_settings.TranslateProvider, 0, 1);
         Row("翻译引擎", _cmbTranslateEngine);
 
         _cmbTranslateTarget.DropDownStyle = ComboBoxStyle.DropDownList;
@@ -227,23 +234,44 @@ public sealed class SettingsForm : Form
         };
         Row("目标语言", _cmbTranslateTarget);
 
-        _txtAiBaseUrl.Text = _settings.AiBaseUrl;
-        _txtAiBaseUrl.Width = 300;
-        Row("AI 接口地址", _txtAiBaseUrl);
+        Section("文字识别");
 
-        _txtAiModel.Text = _settings.AiModel;
-        _txtAiModel.Width = 200;
-        Row("AI 模型", _txtAiModel);
+        _cmbOcrEngine.DropDownStyle = ComboBoxStyle.DropDownList;
+        _cmbOcrEngine.Items.AddRange(new object[]
+        {
+            "在线 DeepSeek-OCR（硅基流动）",
+            "系统自带 WinRT OCR（免配置）"
+        });
+        _cmbOcrEngine.SelectedIndex = Math.Clamp((int)_settings.OcrProvider, 0, 1);
+        Row("识别引擎", _cmbOcrEngine);
 
-        _aiTip.Text = "本地开源模型示例：Ollama 启动后填 http://127.0.0.1:11434/v1，模型填 qwen2.5:7b";
-        _aiTip.AutoSize = false;
-        _aiTip.Height = 34;
-        _aiTip.Width = 320;
-        _aiTip.Font = Theme.SmallFont;
-        _aiTip.ForeColor = Theme.TextMuted;
-        Row("", _aiTip);
+        _txtSfOcrModel.Text = _settings.SiliconFlowOcrModel;
+        _txtSfOcrModel.Width = 260;
+        Row("在线识别模型", _txtSfOcrModel);
 
-        SyncAiFields();
+        Section("硅基流动 SiliconFlow");
+
+        _txtSfApiKey.Text = _settings.SiliconFlowApiKey;
+        _txtSfApiKey.Width = 300;
+        _txtSfApiKey.UseSystemPasswordChar = true;
+        Row("API Key", _txtSfApiKey);
+
+        _txtSfBaseUrl.Text = _settings.SiliconFlowBaseUrl;
+        _txtSfBaseUrl.Width = 300;
+        Row("接口地址", _txtSfBaseUrl);
+
+        _txtSfTranslateModel.Text = _settings.SiliconFlowTranslateModel;
+        _txtSfTranslateModel.Width = 260;
+        Row("翻译模型", _txtSfTranslateModel);
+
+        _sfTip.Text = "翻译用硅基流动混元大模型 Hunyuan-MT-7B；在线识图用 DeepSeek-OCR。填写 API Key 后，" +
+                     "翻译引擎选「硅基流动」即走混元翻译，识别引擎选「在线 DeepSeek-OCR」即走在线识别。";
+        _sfTip.AutoSize = false;
+        _sfTip.Height = 48;
+        _sfTip.Width = 320;
+        _sfTip.Font = Theme.SmallFont;
+        _sfTip.ForeColor = Theme.TextMuted;
+        Row("", _sfTip);
 
         Section("其他");
 
@@ -332,6 +360,50 @@ public sealed class SettingsForm : Form
 
         // 输入控件统一成胶囊语言：去边框 + 圆角底衬（原生边框无法圆角化）
         Ui.FormStyler.Restyle(root);
+
+        // 禁止滚轮改设置值：ComboBox / NumericUpDown 获得焦点时，滚轮本会切换选项 / 步进数值，
+        // 用户误滚就会悄悄改掉配置。这里把滚轮事件吞掉（Handled=true）并转发给滚动容器，
+        // 让滚轮只用于页面滚动。ComboBox 下拉展开时滚轮仍正常作用于下拉列表。
+        BlockWheelOnValueControls(root, scrollHost);
+    }
+
+    /// <summary>
+    /// 拦截值控件的滚轮：滚轮不再改变 ComboBox 选中项 / NumericUpDown 数值，
+    /// 而是转成页面的垂直滚动。
+    /// </summary>
+    private static void BlockWheelOnValueControls(Control root, ScrollableControl scroller)
+    {
+        foreach (Control child in root.Controls)
+        {
+            if (child is ComboBox cb)
+            {
+                cb.MouseWheel += (_, e) =>
+                {
+                    if (cb.DroppedDown) return;   // 下拉展开时让滚轮正常滚动下拉项
+                    ((HandledMouseEventArgs)e).Handled = true;
+                    ScrollBy(scroller, e.Delta);
+                };
+            }
+            else if (child is NumericUpDown nud)
+            {
+                nud.MouseWheel += (_, e) =>
+                {
+                    ((HandledMouseEventArgs)e).Handled = true;
+                    ScrollBy(scroller, e.Delta);
+                };
+            }
+
+            if (child.Controls.Count > 0) BlockWheelOnValueControls(child, scroller);
+        }
+    }
+
+    /// <summary>按滚轮增量滚动容器；到底/到顶时事件已 Handled，不再传给其他控件。</summary>
+    private static void ScrollBy(ScrollableControl scroller, int delta)
+    {
+        // 一次滚轮格约 120，换算成 3 行文字高度（与系统滚轮手感接近）
+        int step = delta > 0 ? -40 : 40;
+        int newY = scroller.AutoScrollPosition.Y + step;
+        scroller.AutoScrollPosition = new Point(0, -newY);
     }
 
     /// <summary>
@@ -422,16 +494,6 @@ public sealed class SettingsForm : Form
     [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
-    /// <summary>只有选了开源 AI 引擎时才启用接口地址/模型输入框。</summary>
-    private void SyncAiFields()
-    {
-        bool ai = _cmbTranslateEngine.SelectedIndex == (int)TranslateProvider.OpenSourceAi;
-        _txtAiBaseUrl.Enabled = ai;
-        _txtAiModel.Enabled = ai;
-        _txtAiBaseUrl.BackColor = ai ? Theme.Surface : Theme.SurfaceAlt;
-        _txtAiModel.BackColor = ai ? Theme.Surface : Theme.SurfaceAlt;
-    }
-
     private void HotkeyCapture(object? sender, KeyEventArgs e)
     {
         if (sender is not TextBox box) return;
@@ -511,10 +573,16 @@ public sealed class SettingsForm : Form
             4 => "ko",
             _ => "zh-CN"
         };
-        if (!string.IsNullOrWhiteSpace(_txtAiBaseUrl.Text))
-            _settings.AiBaseUrl = _txtAiBaseUrl.Text.Trim();
-        if (!string.IsNullOrWhiteSpace(_txtAiModel.Text))
-            _settings.AiModel = _txtAiModel.Text.Trim();
+
+        _settings.OcrProvider = (OcrProvider)_cmbOcrEngine.SelectedIndex;
+
+        _settings.SiliconFlowApiKey = _txtSfApiKey.Text.Trim();
+        if (!string.IsNullOrWhiteSpace(_txtSfBaseUrl.Text))
+            _settings.SiliconFlowBaseUrl = _txtSfBaseUrl.Text.Trim();
+        if (!string.IsNullOrWhiteSpace(_txtSfTranslateModel.Text))
+            _settings.SiliconFlowTranslateModel = _txtSfTranslateModel.Text.Trim();
+        if (!string.IsNullOrWhiteSpace(_txtSfOcrModel.Text))
+            _settings.SiliconFlowOcrModel = _txtSfOcrModel.Text.Trim();
 
         _settings.Save();
     }

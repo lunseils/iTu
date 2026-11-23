@@ -16,7 +16,8 @@ Windows 桌面截图工具，复刻 QQ 截图与 Windows 11 截图工具的核�
 | **独立版**（推荐） | `dist/iTu-standalone/` | 49 MB | 内含 .NET 运行时，**任何 Windows 10/11 机器双击即用**，无需安装任何东西 |
 | 轻量版 | `dist/iTu/` | 435 KB | 需要系统已安装 .NET 10 Desktop Runtime |
 
-两个目录里都是 `iTu.exe` + `ocr.ps1` 两个文件，**必须放在同一目录**（OCR 依赖后者）。
+两个目录里都只有 `iTu.exe` 一个文件——OCR 脚本已作为资源内嵌进 exe，运行时用
+`-EncodedCommand` 从内存执行，无需再附带 `ocr.ps1`。
 
 > 若双击后没有反应，多半是用了轻量版但系统没装 .NET 10 Desktop Runtime
 > （显示"需要安装 .NET"或直接闪退）。改用独立版即可。
@@ -72,7 +73,7 @@ dotnet publish -c Release -r win-x64 -p:SelfContained=true \
 
 ### 排查
 
-- 启动日志：`%TEMP%\itu.log`
+- 启动日志：`%TEMP%\itu-<用户名哈希>.log`（托盘「关于 / 诊断」里显示完整路径）
 - 托盘右键 →「关于 / 诊断」：版本、PID、程序路径、热键注册状态、日志路径
 - 托盘右键 →「打开日志文件」：用记事本打开日志
 
@@ -171,7 +172,7 @@ iTu/
 │   ├── ResultWriter.cs       # 落盘（同秒不覆盖）
 │   ├── TextBackdrop.cs       # 文字标注底板
 │   ├── Log.cs                # 轻量日志
-│   └── ocr.ps1               # OCR 脚本资源
+│   └── ocr.ps1               # OCR 脚本（嵌入资源，随 exe 编译，不单独发布）
 ├── Ui/                       # 表现层
 │   ├── Theme.cs              # 配色 / 圆角 / 阴影规范
 │   ├── LayeredSurface.cs     # 分层窗口提交（UpdateLayeredWindow + DIB 复用）

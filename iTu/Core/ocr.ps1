@@ -6,11 +6,21 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File ocr.ps1 -Path <图片路径> -Lines
 #       输出：JSON 数组，每项为该行的文本与包围盒 { t, x, y, w, h }
 #             （供「翻译叠加」按原位置回填译文）
+#   iTu.exe 内嵌本脚本，运行时用 -EncodedCommand 执行，参数经环境变量 ITU_OCR_PATH /
+#       ITU_OCR_LINES 传入（脚本不落盘，发布目录只需一个 exe）。
 
 param(
-    [Parameter(Mandatory = $true)][string]$Path,
+    [string]$Path,
     [switch]$Lines
 )
+
+# 内嵌执行（-EncodedCommand）时没有命令行参数，从环境变量补齐。
+if ([string]::IsNullOrEmpty($Path)) { $Path = $env:ITU_OCR_PATH }
+if ($env:ITU_OCR_LINES -eq '1') { $Lines = $true }
+if ([string]::IsNullOrEmpty($Path)) {
+    [Console]::Error.WriteLine('NO_IMAGE_PATH')
+    exit 3
+}
 
 $ErrorActionPreference = 'Stop'
 
@@ -46,7 +56,10 @@ try {
             [Windows.Globalization.Language]::new('zh-Hans'))
     }
     if ($null -eq $engine) {
-        Write-Error 'NO_OCR_ENGINE'
+        # 不能用 Write-Error：$ErrorActionPreference='Stop' 下它会抛异常，
+        # 直接进入外层 catch → exit 1，导致 C# 端针对 exit 2 的
+        # "未安装 OCR 语言包"友好提示永远不可达。这里直接写 stderr 并以 2 退出。
+        [Console]::Error.WriteLine('NO_OCR_ENGINE')
         exit 2
     }
 

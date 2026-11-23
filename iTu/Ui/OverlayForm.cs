@@ -345,6 +345,10 @@ public sealed class OverlayForm : Form
         PaintBaseLayer(g, clip);
 
         g.CompositingMode = CompositingMode.SourceOver;
+        // 所有矢量 UI（选区框、圆角条、提示条、胶囊等）统一开抗锯齿。
+        // 此前未全局设置，圆角边框的 DrawPath 落在默认 None 上，圆弧完全无
+        // 抗锯齿，圆角处会露出明显台阶。这里作为绘制 UI 的默认质量兜底。
+        g.SmoothingMode = SmoothingMode.AntiAlias;
 
         var sel = ToLocal(Selection);
 
@@ -409,7 +413,7 @@ public sealed class OverlayForm : Form
         if (Picker != null && clip.IntersectsWith(ToLocal(Picker.Bounds)))
             Picker.Draw(g, origin);
 
-        // 4.7) 顶部功能条（截图/录屏/长截图/隐藏当前窗口），框选时由会话隐藏
+        // 4.7) 顶部功能条（截图/录屏/隐藏当前窗口），框选时由会话隐藏
         if (Bar is { Visible: true } bar)
         {
             var barLocal = ToLocal(bar.Bounds);
@@ -573,18 +577,6 @@ public sealed class OverlayForm : Form
 
     private bool _radiusMaskFill = true;
 
-    private static GraphicsPath RoundedRect(RectangleF r, float radius)
-    {
-        var path = new GraphicsPath();
-        float d = Math.Max(1f, Math.Min(radius, Math.Min(r.Width, r.Height) / 2f) * 2f);
-        path.AddArc(r.X, r.Y, d, d, 180, 90);
-        path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
-        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-        path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
-        path.CloseFigure();
-        return path;
-    }
-
     /// <summary>
     /// 选区框 + 8 个控制点 + 四边扩拉线。
     ///
@@ -602,7 +594,7 @@ public sealed class OverlayForm : Form
         if (Radius > 0)
         {
             float r = Math.Min(Radius, Math.Min(sel.Width, sel.Height) / 2f);
-            using var path = RoundedRect(sel, r);
+            using var path = Theme.RoundedRect(sel, r);
 
             if (_radiusMaskFill)
             {
@@ -647,19 +639,32 @@ public sealed class OverlayForm : Form
         var bar = ToLocal(barScreen);
         if (!ClientRectangle.IntersectsWith(bar)) return;
 
-        // 胶囊背景：与主胶囊同一套 —— 柔影 + 白底 + 细描边 + 极淡纹理
+        // 与主胶囊同一套平滑圆角：整体超采样 2 倍再缩小，复刻 ituk 的
+        // paintSupersampled。圆角条左右两端是半径=半高的圆弧，1:1 抗锯齿
+        // （8x4 网格）会留台阶，超采样后边缘更连续。
+        var state = g.Save();
+        g.TranslateTransform(bar.X, bar.Y);
+        Theme.DrawSupersampled(g, new Rectangle(0, 0, bar.Width, bar.Height),
+            bg => DrawToolbarCore(bg, bar), factor: 2, margin: 6);
+        g.Restore(state);
+    }
+
+    /// <summary>圆角工具条的实际绘制，坐标一律相对 bar 左上角（0,0 起）。</summary>
+    private void DrawToolbarCore(Graphics g, Rectangle bar)
+    {
         float radius = bar.Height / 2f;
-        var shadowRect = new RectangleF(bar.X, bar.Y + 2, bar.Width, bar.Height);
+
+        // 胶囊背景：与主胶囊同一套 —— 柔影 + 白底 + 细描边
+        var shadowRect = new RectangleF(0, 2, bar.Width, bar.Height);
         for (int i = 3; i >= 1; i--)
         {
             using var shadow = new SolidBrush(Color.FromArgb(14, 0, 0, 0));
-            using var sp = RoundedRect(RectangleF.Inflate(shadowRect, i, i), radius + i);
+            using var sp = Theme.RoundedRect(RectangleF.Inflate(shadowRect, i, i), radius + i);
             g.FillPath(shadow, sp);
         }
 
-        using (var path = RoundedRect(bar, radius))
+        using (var path = Theme.RoundedRect(new RectangleF(0, 0, bar.Width, bar.Height), radius))
         {
-            // 参考图里这条就是纯白平涂（没有主胶囊那层纹理），照做
             using var fill = new SolidBrush(Color.FromArgb(252, 255, 255, 255));
             g.FillPath(fill, path);
 
@@ -667,28 +672,22 @@ public sealed class OverlayForm : Form
             g.DrawPath(pen, path);
         }
 
-        // 参考图的字是近黑、灰度抗锯齿；ClearType 会在放大后露出彩色描边，和参考不一致
+        // 文字近黑、灰度抗锯齿（非 ClearType，超采样缩小后不出现彩色描边）
         using var text = new SolidBrush(Color.FromArgb(10, 12, 16));
         using var muted = new SolidBrush(Color.FromArgb(10, 12, 16));
-        var hintBackup = g.TextRenderingHint;
         g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
 
-        var (sliderS, shadowS, _) = OverlaySession.ToolbarParts(barScreen);
-        var slider = ToLocal(sliderS);
-        var shadowBox = ToLocal(shadowS);
+        // 滑杆与勾选框的相对位置（相对 bar 左上角，与 OverlaySession.ToolbarParts 同源）
+        var slider = new Rectangle(158, bar.Height / 2 - 2, 104, 4);
+        var shadowBox = new Rectangle(bar.Width - 35, (bar.Height - 15) / 2, 15, 15);
 
-        // 字体比原来大一档（8pt → 9.25pt）：34px 高的条里 8pt 字上下都是空的，看着"细"
         const float lineH = 20f;
-        float textY = bar.Top + (bar.Height - lineH) / 2f;
+        float textY = (bar.Height - lineH) / 2f;
 
-        // 尺寸
         g.DrawString($"{SelectionScreen.Width} × {SelectionScreen.Height}", Theme.ToolbarFont, text,
-            bar.Left + 18, textY);
+            18, textY);
+        g.DrawString("圆角", Theme.ToolbarFont, muted, 116, textY);
 
-        // 圆角标签
-        g.DrawString("圆角", Theme.ToolbarFont, muted, bar.Left + 116, textY);
-
-        // 滑杆（轨道中心线在 slider 中线）
         float trackY = slider.Top + slider.Height / 2f;
         using (var track = new Pen(Color.FromArgb(205, 212, 222), 4f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
             g.DrawLine(track, slider.Left, trackY, slider.Right, trackY);
@@ -700,17 +699,13 @@ public sealed class OverlayForm : Form
         using (var fill = new Pen(Theme.Accent, 4f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
             g.DrawLine(fill, slider.Left, trackY, kx, trackY);
 
-        // 圆钮：白底 + 细环。没调过圆角时环是淡灰的（不抢视线），
-        // 一旦有值才变主色，和"滑杆已生效"的语义一致。
         var ringColor = Radius > 0 ? Theme.Accent : Color.FromArgb(214, 220, 229);
         g.FillEllipse(Brushes.White, kx - 7f, trackY - 7f, 14, 14);
         using (var ring = new Pen(ringColor, 1.5f))
             g.DrawEllipse(ring, kx - 7f, trackY - 7f, 14, 14);
 
-        // 数值（紧跟在滑杆右侧）
-        g.DrawString(Radius.ToString(), Theme.ToolbarFont, muted, bar.Left + 276, textY);
+        g.DrawString(Radius.ToString(), Theme.ToolbarFont, muted, 276, textY);
 
-        // 阴影 + 勾选框（15px 圆角方框、浅灰描边、勾选态填主色 + 白勾）
         using (var labelFmt = new StringFormat
                {
                    Alignment = StringAlignment.Far,
@@ -718,14 +713,13 @@ public sealed class OverlayForm : Form
                    FormatFlags = StringFormatFlags.NoWrap
                })
         {
-            // 文字右端距勾选框 10px，左侧留够给数值
-            var labelRect = new RectangleF(bar.Left + 276, bar.Top,
-                Math.Max(24, shadowBox.Left - 10 - (bar.Left + 276)), bar.Height);
+            var labelRect = new RectangleF(276, 0,
+                Math.Max(24, shadowBox.Left - 10 - 276), bar.Height);
             g.DrawString("阴影", Theme.ToolbarFont, muted, labelRect, labelFmt);
         }
 
         var cb = new RectangleF(shadowBox.X + 0.5f, shadowBox.Y + 0.5f, shadowBox.Width - 1, shadowBox.Height - 1);
-        using (var cbPath = RoundedRect(cb, 4f))
+        using (var cbPath = Theme.RoundedRect(cb, 4f))
         {
             if (ShadowEnabled)
             {
@@ -757,9 +751,6 @@ public sealed class OverlayForm : Form
                 new PointF(cx + 11.6f, cy + 4.6f)
             });
         }
-
-        // 还原绘制提示：这张位图后面还要画标注/放大镜，不能带着这里的设置跑
-        g.TextRenderingHint = hintBackup;
     }
 
     private const int LensCell = 14;   // 单像素放大后的边长

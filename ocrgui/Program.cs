@@ -255,12 +255,23 @@ static class P
         }
 
         // 1) 记事本 + 已知文本
-        File.WriteAllText(Sample,
-            "iTu OCR TEST" + Environment.NewLine +
-            "HELLO 12345" + Environment.NewLine +
-            "The quick brown fox" + Environment.NewLine +
-            "jumps over the lazy dog" + Environment.NewLine,
-            new UTF8Encoding(true));
+        // 长截图用例需要大量行制造可滚动内容，其余用例保持 4 行已知文本。
+        if (mode == "longshot")
+        {
+            var sb = new StringBuilder();
+            for (int i = 1; i <= 400; i++)
+                sb.AppendLine($"iTu LONG SHOT LINE {i:D3} 0123456789 abcdefghijklmnopqrstuvwxyz");
+            File.WriteAllText(Sample, sb.ToString(), new UTF8Encoding(true));
+        }
+        else
+        {
+            File.WriteAllText(Sample,
+                "iTu OCR TEST" + Environment.NewLine +
+                "HELLO 12345" + Environment.NewLine +
+                "The quick brown fox" + Environment.NewLine +
+                "jumps over the lazy dog" + Environment.NewLine,
+                new UTF8Encoding(true));
+        }
 
         // 旧实例一律清掉：Win11 记事本是单进程多标签，残留窗口会让 FindByClass 摸到一个
         // 不可见的老句柄，置顶半天置的不是用户看得见的那一个。
@@ -310,6 +321,7 @@ static class P
         if (mode == "barmove") { RunBarMove(app, note); return; }
         if (mode == "barresize") { RunBarResize(app, note); return; }
         if (mode == "windows") { RunWindowPick(app, note); return; }
+        if (mode == "longshot") { RunLongShot(app, note); return; }
 
         // 3) 拖选区
         Drag(SelL, SelT, SelR, SelB);
@@ -988,44 +1000,49 @@ static class P
     }
 
     /// <summary>
-    /// 识图要"落在图上"：识别结果原位重写原文，**不弹任何窗口**，会话也不结束。
+    /// 文字提取要"取走文字但不碰图面"：识别结果复制到剪贴板，**不改写原图**。
     ///
     /// 四个断言：
-    ///   A 日志出现"已写回选区画面"（走改写画面的路径，而不是弹面板的路径）
+    ///   A 日志出现"已复制到剪贴板"（走提取路径，而不是翻译的"写回画面"路径）
     ///   B 会话没有结束（界面还在用户手上，可以接着保存/标注）
-    ///   C 整个过程 iTu 没有多出可见窗口（之前左上角那个结果窗就是这么冒出来的）
-    ///   D 保存出来的图里文字还在（不是被抹成一片白）
+    ///   C 整个过程 iTu 没有多出可见窗口
+    ///   D 提取前后选区画面像素不变（原文没被识别结果污染 —— 修复"弄脏图面"BUG 的核心）
     /// </summary>
     static void RunOcrApply(Process app, Process note, int pillX, int pillY, float s)
     {
         var sel = new Rectangle(SelL, SelT, SelR - SelL, SelB - SelT);
         Grab(OutDir + "ocra_0_before.png", sel);
         int windowsBefore = VisibleAppWindows(app.Id);
-        Console.WriteLine($"[info] 点识图前 iTu 可见窗口={windowsBefore}");
+        Console.WriteLine($"[info] 点文字提取前 iTu 可见窗口={windowsBefore}");
 
         Click(pillX + (int)Math.Round(294 * s), pillY + (int)(19 * s));   // 文字提取
 
-        bool done = WaitForLog("已写回选区画面", 25000) || WaitForLog("识别失败", 1200);
+        bool done = WaitForLog("已复制到剪贴板", 25000) || WaitForLog("识别失败", 1200);
         Thread.Sleep(400);
 
         int windowsAfter = VisibleAppWindows(app.Id);
-        Console.WriteLine($"[info] 识图完成后 iTu 可见窗口={windowsAfter}");
+        Console.WriteLine($"[info] 文字提取后 iTu 可见窗口={windowsAfter}");
         Grab(OutDir + "ocra_1_after.png", sel);
         Grab(OutDir + "ocra_2_pill_label.png", new Rectangle(0, 150, 1100, 220));
 
         var lines = File.Exists(LogPath) ? File.ReadAllLines(LogPath) : Array.Empty<string>();
         bool ended = lines.Any(l => l.Contains("会话结束"));
-        bool applied = lines.Any(l => l.Contains("已写回选区画面"));
+        bool copied = lines.Any(l => l.Contains("已复制到剪贴板"));
         bool recognized = lines.Any(l => l.Contains("识别成功"));
 
-        Console.WriteLine((done ? "[PASS] " : "[FAIL] ") + "识图有结果（不是静默无响应）");
-        Console.WriteLine((recognized && applied ? "[PASS] " : "[FAIL] ") +
-                          "识别结果直接写回选区画面（不弹文本面板）");
-        Console.WriteLine((!ended ? "[PASS] " : "[FAIL] ") + "识图没有结束截图会话");
+        Console.WriteLine((done ? "[PASS] " : "[FAIL] ") + "文字提取有结果（不是静默无响应）");
+        Console.WriteLine((recognized && copied ? "[PASS] " : "[FAIL] ") +
+                          "识别结果复制到剪贴板（不改写画面）");
+        Console.WriteLine((!ended ? "[PASS] " : "[FAIL] ") + "文字提取没有结束截图会话");
         Console.WriteLine((windowsAfter <= windowsBefore ? "[PASS] " : "[FAIL] ") +
-                          $"识图过程中没有多出窗口（{windowsBefore} → {windowsAfter}）");
+                          $"文字提取过程中没有多出窗口（{windowsBefore} → {windowsAfter}）");
 
-        // 保存，确认落盘的就是"写着文字"的那张图
+        // 核心断言：文字提取不改动图面。注意不能用提取后 400ms 的屏幕截图对比——
+        // 那时胶囊格位旁的临时标签「已提取 N 行 · 已复制」还没消失，会落进抓取范围。
+        // 正确做法：对比「提取前」与「保存出来的图」，产物才代表用户真正拿到的画面。
+        int darkBefore = CountDark(OutDir + "ocra_0_before.png");
+
+        // 保存，确认落盘的就是原文（未被污染）
         var before = NewestSavedFile(SaveDir());
         Click(pillX + (int)Math.Round(501 * s), pillY + (int)(19 * s));   // 保存
         Thread.Sleep(1500);
@@ -1035,11 +1052,11 @@ static class P
         if (saved)
         {
             File.Copy(after!, OutDir + "ocra_3_saved.png", true);
-            int darkBefore = CountDark(OutDir + "ocra_0_before.png");
             int darkSaved = CountDark(OutDir + "ocra_3_saved.png");
-            bool textKept = darkSaved >= darkBefore * 0.5 && darkSaved <= darkBefore * 2.0;
-            Console.WriteLine((textKept ? "[PASS] " : "[FAIL] ") +
-                              $"保存的图里文字还在（深色像素 {darkBefore} → {darkSaved}）");
+            // 产物深色像素应与原文几乎一致（偏差 < 5%），证明原文没被识别结果污染
+            bool unchanged = darkSaved >= darkBefore * 0.95 && darkSaved <= darkBefore * 1.05;
+            Console.WriteLine((unchanged ? "[PASS] " : "[FAIL] ") +
+                              $"保存的图与原文一致（深色像素 {darkBefore} → {darkSaved}）");
         }
 
         Console.WriteLine("[log]");
@@ -1622,6 +1639,110 @@ static class P
         try { app.Kill(); } catch { }
         try { note.Kill(); } catch { }
         Console.WriteLine("[OK] windows");
+    }
+
+    /// <summary>
+    /// 长截图真机回归：记事本灌 400 行制造可滚动内容 → 点功能条「长截图」按钮
+    /// （此时无选区、功能条可见）→ 新会话框选编辑区 → 回车确认 → 等滚动拼接完成
+    /// → 断言产物高度 &gt; 选区高度且日志齐全。
+    ///
+    /// 判定依据（不做像素比对，滚动拼接的成败只看两件事）：
+    ///   1. 日志出现 [longshot] 已保存（采集 + 拼接 + 落盘全链路走通）；
+    ///   2. 保存出来的 PNG 高度明显大于框选的选区高度（证明真的滚动拼了多屏）。
+    /// </summary>
+    static void RunLongShot(Process app, Process note)
+    {
+        // 日志里会话开始那行带「长截图按钮=」几何 —— 用它定位按钮，避免硬编码
+        var init = LastLineWith("长截图按钮=");
+        if (!TryRect(init, "长截图按钮", out var lsBtn))
+        {
+            Console.WriteLine("[FAIL] 日志里没有长截图按钮几何 " + (init ?? ""));
+            try { app.Kill(); } catch { }
+            try { note.Kill(); } catch { }
+            return;
+        }
+        Console.WriteLine($"[geom] 长截图按钮={lsBtn.X},{lsBtn.Y},{lsBtn.Width},{lsBtn.Height}");
+
+        // 点「长截图」：此时还没有选区，功能条可见，点它结束当前会话 → 开"框选滚动区域"会话
+        Click(Center(lsBtn));
+        Thread.Sleep(600);
+        var reqLine = LastLineWith("[bar] 长截图");
+        Console.WriteLine((reqLine != null ? "[PASS] " : "[FAIL] ") +
+                          $"点长截图按钮触发了长截图流程 {(reqLine ?? "")}");
+
+        // 现在进入新的"框选滚动区域"会话（第二次 overlay 会话开始）
+        bool secondSession = WaitForLog("会话开始", 3000);
+        Console.WriteLine((secondSession ? "[PASS] " : "[FAIL] ") + "进入了框选滚动区域的会话");
+
+        // 框选记事本编辑区，然后回车确认
+        int selL = 60, selT = 48, selR = 700, selB = 380;
+        Drag(selL, selT, selR, selB);
+        Thread.Sleep(500);
+        Grab(OutDir + "longshot_0_selection.png", new Rectangle(0, 0, 1000, 560));
+
+        int selH = selB - selT;
+        Console.WriteLine($"[geom] 选区高度={selH}px（期望拼接后远大于此）");
+
+        // 回车确认，结束框选会话 → 进入滚动采集
+        N.keybd_event(0x0D, 0, 0, IntPtr.Zero);
+        Thread.Sleep(60);
+        N.keybd_event(0x0D, 0, 2, IntPtr.Zero);
+        Thread.Sleep(600);
+
+        // 开始采集
+        bool started = WaitForLog("[longshot] 开始采集", 4000);
+        Console.WriteLine((started ? "[PASS] " : "[FAIL] ") + "进入长截图采集流程");
+
+        // 滚动采集阶段（日志里会有「滚动采集 第 N 帧」）
+        bool scrolled = WaitForLog("滚动采集", 8000);
+        Console.WriteLine((scrolled ? "[PASS] " : "[FAIL] ") + "发生了滚动采集");
+
+        // 拼接阶段
+        bool stitched = WaitForLog("正在拼接", 15000);
+        Console.WriteLine((stitched ? "[PASS] " : "[FAIL] ") + "进入拼接阶段");
+
+        // 保存成功（最终落盘）
+        bool saved = WaitForLog("[longshot] 已保存", 20000);
+        Console.WriteLine((saved ? "[PASS] " : "[FAIL] ") + "长截图保存成功");
+
+        // 从日志里取保存路径，量产物高度
+        var saveLine = LastLineWith("[longshot] 已保存");
+        string? path = null;
+        if (saveLine != null)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(saveLine, @"已保存\s+(.+)$");
+            if (m.Success) path = m.Groups[1].Value.Trim();
+        }
+
+        if (path != null && File.Exists(path))
+        {
+            using var img = new Bitmap(path);
+            int outH = img.Height, outW = img.Width;
+            Console.WriteLine($"[result] 产物 {outW}×{outH} @ {path}");
+            // 核心断言：拼接结果高度必须明显超过单屏选区高度（至少多出 1 屏）
+            Console.WriteLine((outH > selH + 100 ? "[PASS] " : "[FAIL] ") +
+                              $"拼接图高度大于选区高度 选区={selH}px 产物={outH}px");
+            // 宽度应与选区一致（纵向拼接不该改变宽度）
+            Console.WriteLine((outW >= selR - selL - 2 ? "[PASS] " : "[FAIL] ") +
+                              $"拼接图宽度与选区一致 选区宽={selR - selL} 产物宽={outW}");
+            // 存一张缩略图便于人眼核对
+            Grab(OutDir + "longshot_2_result_thumb.png", new Rectangle(0, 0, Math.Min(outW, 900), Math.Min(outH, 700)));
+        }
+        else
+        {
+            Console.WriteLine("[FAIL] 找不到长截图产物文件 " + (saveLine ?? "（无保存日志）"));
+        }
+
+        // 打印长截图相关日志段
+        Console.WriteLine("[log]");
+        if (File.Exists(LogPath))
+            foreach (var line in File.ReadAllLines(LogPath))
+                if (line.Contains("[longshot]") || line.Contains("[bar] 长截图"))
+                    Console.WriteLine("  " + line);
+
+        try { app.Kill(); } catch { }
+        try { note.Kill(); } catch { }
+        Console.WriteLine("[OK] longshot");
     }
 
     /// <summary>

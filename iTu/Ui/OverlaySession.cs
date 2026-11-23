@@ -903,41 +903,16 @@ public sealed class OverlaySession : IDisposable
 
     private (Cursor Cursor, string Name) ComputeCursor(Point p)
     {
-        if (_bar.Visible)
+        // 未编辑（未选工具）时，鼠标在选区（脏区）内部 → 移动光标；
+        // 其余状态（次级胶囊、画形状、工具栏、选区把手等）统一普通箭头。
+        if (Tool == null && Selection.Width > 8 && Selection.Height > 8)
         {
-            if (_bar.OnDragHandle(p)) return (Cursors.SizeAll, "bar-drag");
-            if (_bar.ChipContains(p)) return (Cursors.Hand, "bar-chip");
-            if (_bar.MenuItemAt(p) >= 0) return (Cursors.Hand, "bar-menu");
-            if (_bar.Contains(p)) return (Cursors.Hand, "bar");
+            if (GripAt(Selection, p) == Grip.Move)
+                return (Cursors.SizeAll, "move");
         }
 
-        if (_popup?.Contains(p) == true) return (Cursors.Hand, "picker");
-        if (_flyVisible && _fly?.Contains(p) == true) return (Cursors.Hand, "flyout");
-        if (_pillScreen.Width > 8 && _pillScreen.Contains(p)) return (Cursors.Hand, "pill");
-
-        if (Selection.Width > 8 && Selection.Height > 8)
-        {
-            var grip = GripAt(Selection, p);
-            if (grip != Grip.None)
-            {
-                // 脏区内部：没选工具时是"移动整块"，选了工具就是画标注的十字
-                if (grip == Grip.Move) return (Tool == null ? Cursors.SizeAll : Cursors.Cross, "move");
-                return (CursorFor(grip, false), grip.ToString());
-            }
-        }
-
-        return (Cursors.Cross, "cross");
+        return (Cursors.Default, "arrow");
     }
-
-    private static Cursor CursorFor(Grip grip, bool toolActive) => grip switch
-    {
-        Grip.TL or Grip.BR => Cursors.SizeNWSE,
-        Grip.TR or Grip.BL => Cursors.SizeNESW,
-        Grip.T or Grip.B => Cursors.SizeNS,
-        Grip.L or Grip.R => Cursors.SizeWE,
-        Grip.Move => toolActive ? Cursors.Cross : Cursors.SizeAll,
-        _ => Cursors.Cross
-    };
 
     /// <summary>
     /// 布置底部控件：胶囊工具栏 + 圆角条 —— 全部画在遮罩层这一个图层上。
@@ -1180,12 +1155,6 @@ public sealed class OverlaySession : IDisposable
                 Log.Info("[bar] 录屏 → 结束截图会话并进入录制");
                 RecordRequested = true;
                 Finish();
-                break;
-
-            case QuickBar.Btn.LongShot:
-                // 长截图需要滚动拼接，当前版本没有实现：明确说清楚，不给假按钮。
-                _bar.SetStatus("长截图暂未支持", 2000);
-                Log.Info("[bar] 长截图：未实现");
                 break;
 
             // 圆圈现在是选择框：点它只把功能条自己收起来（不动光标下的窗口）
@@ -1578,11 +1547,56 @@ public sealed class OverlaySession : IDisposable
     /// <summary>文字标签：弹输入框，完成后写入标注。</summary>
     private void BeginTextInput(Point p)
     {
-        var pos = new PointF(p.X, p.Y);
-        using var input = new TextInputForm(p, _inkColor, _inkFontSize);
-        input.ShowDialog();
+        // 本方法运行在全局低级鼠标钩子回调栈上。与自定义颜色框同理：
+        // 直接 ShowDialog 会开嵌套消息泵，钩子同线程重入，输入框上的点击会被
+        // 浮层当成选区/标注操作。复用同一套防护：封输入 + 投递到浮层消息队列。
+        var owner = _forms.FirstOrDefault();
+        if (owner == null || _modalOpen) return;
 
-        if (input.Result is { } text)
+        _modalOpen = true;
+        _dragging = false;
+        _grip = Grip.None;
+        _radiusDrag = false;
+        _inkActive = false;
+        _active = null;
+        _downConsumed = false;
+
+        var pos = new PointF(p.X, p.Y);
+        try
+        {
+            owner.BeginInvoke(new Action(() => RunTextInput(owner, pos)));
+        }
+        catch (Exception ex)
+        {
+            Log.Info("[overlay] 文字输入框投递失败: " + ex.Message);
+            _modalOpen = false;
+        }
+    }
+
+    /// <summary>在浮层消息队列里弹出文字输入框（不在钩子回调栈上）。</summary>
+    private void RunTextInput(Form owner, PointF pos)
+    {
+        string? result = null;
+        try
+        {
+            using var input = new TextInputForm(new Point((int)pos.X, (int)pos.Y), _inkColor, _inkFontSize);
+            input.ShowDialog(owner);
+            result = input.Result;
+        }
+        catch (Exception ex)
+        {
+            Log.Info("[overlay] 文字输入框失败: " + ex.Message);
+        }
+        finally
+        {
+            // 丢弃模态期间积压的鼠标事件，重置光标基准与时间戳，避免残留被当成新拖拽。
+            Native.GetCursorPos(out var c);
+            _current = new Point(c.X, c.Y);
+            _lastDownTick = Environment.TickCount64;
+            _modalOpen = false;
+        }
+
+        if (result is { } text)
         {
             DropRedo();
             _strokes.Add(new Core.TextAnnotation
@@ -1932,7 +1946,18 @@ public sealed class OverlaySession : IDisposable
 
             try
             {
-                lines = await OcrService.RecognizeLinesAsync(crop);
+                if (translate)
+                {
+                    // 翻译要"原位替换"，必须有**真实行框坐标**。在线 DeepSeek-OCR
+                    // 纯文本模式不返回坐标，每行都用整图兜底矩形，字号推算会崩坏。
+                    // 因此翻译走独立路径：优先带坐标的引擎，兜底坐标则回退本地 WinRT。
+                    lines = await RecognizeForTranslateAsync(crop, settings);
+                }
+                else
+                {
+                    lines = await OcrService.RecognizeLinesAsync(crop, settings);
+                }
+
                 if (translate && lines.Count > 0)
                 {
                     var source = lines.Select(l => l.Text).ToList();
@@ -1950,6 +1975,55 @@ public sealed class OverlaySession : IDisposable
 
             PostToOverlay(() => OnTextTaskDone(translate, lines, translated, error, clipped));
         });
+    }
+
+    /// <summary>
+    /// 翻译专用的识别：保证返回的每行都有**真实行框坐标**。
+    ///
+    /// 背景：在线 DeepSeek-OCR 纯文本模式（当前默认在线引擎）不返回坐标，
+    /// 每行都用整幅图的兜底矩形 {0,0,w,h}——用它做原位替换会把一整屏高度
+    /// 当成"一行"的字号，译文严重偏大。所以这里在坐标无效时回退本地 WinRT OCR
+    /// （它返回精确的逐行 x/y/w/h），保证翻译写回定位正确。
+    /// </summary>
+    private async Task<IReadOnlyList<OcrLine>> RecognizeForTranslateAsync(Bitmap crop, AppSettings settings)
+    {
+        var lines = await OcrService.RecognizeLinesAsync(crop, settings);
+
+        // 有真实坐标（各行行框互不相同、且不覆盖整图）就直接用
+        if (HasRealCoordinates(lines, crop.Width, crop.Height))
+            return lines;
+
+        Log.Info("[text] 所选识别引擎未返回行框坐标，翻译改用本地 WinRT OCR 定位");
+
+        // 回退本地 WinRT OCR 拿真实坐标；失败则退回原结果（文字提取仍可用）
+        try
+        {
+            var local = await OcrService.RecognizeLinesLocalAsync(crop);
+            if (local.Count > 0 && HasRealCoordinates(local, crop.Width, crop.Height))
+                return local;
+        }
+        catch (Exception ex)
+        {
+            Log.Info("[text] 本地 WinRT OCR 定位回退失败: " + ex.Message);
+        }
+
+        return lines;
+    }
+
+    /// <summary>判断这批行是否有可用于原位替换的真实坐标（而非整图兜底矩形）。</summary>
+    private static bool HasRealCoordinates(IReadOnlyList<OcrLine> lines, int imgW, int imgH)
+    {
+        if (lines.Count == 0) return false;
+
+        // 至少有两行的行框互不相同 → 说明不是"每行都贴整图"的兜底坐标
+        var first = lines[0].Bounds;
+        for (int i = 1; i < lines.Count; i++)
+        {
+            if (lines[i].Bounds != first) return true;
+        }
+
+        // 全部相同时，只要不是"整幅图"那个兜底矩形就仍算有效（单行真实框）
+        return first.Width < imgW || first.Height < imgH || first.X != 0 || first.Y != 0;
     }
 
     private void OnTextTaskDone(bool translate, IReadOnlyList<OcrLine> lines, string[]? translated,
@@ -1977,67 +2051,56 @@ public sealed class OverlaySession : IDisposable
             return;
         }
 
-        // 识图不再"出图 + 弹文字面板"：识别结果和译文走同一条路 ——
-        // 原位写回画面（原文被采样背景填掉，再按原字号重写一遍）。
-        // 用户看到的始终是截图本身，左上角也不会再冒出一个结果窗口。
-        string[] target;
-        if (translate)
+        // ---- 文字提取（识图）与翻译走不同的收尾 ----
+        // 翻译：把译文"原位替换"写回画面（原文被采样背景填掉，再按原字号重写译文）。
+        // 文字提取：只把识别结果复制到剪贴板，**绝不碰图面** —— OCR 对代码/URL 等
+        // 非自然语言文本识别本就有错别字，若把识别结果重写回画面会把原文擦掉、
+        // 用错误文本覆盖，等于"弄脏"了用户的截图（历史 BUG）。
+        if (!translate)
         {
-            // 译文与原文逐行相同 → 公共接口没生效（翻译服务静默回退原文），
-            // 这时把原文重画一遍等于撒谎，只在格位上提示失败。
-            var src = lines.Select(l => l.Text).ToList();
-            int changed = 0;
-            for (int i = 0; i < src.Count && translated != null && i < translated.Length; i++)
-            {
-                var dst = translated[i]?.Trim();
-                if (!string.IsNullOrWhiteSpace(dst) &&
-                    !string.Equals(src[i].Trim(), dst, StringComparison.OrdinalIgnoreCase))
-                    changed++;
-            }
-
-            if (changed == 0)
-            {
-                Log.Info("[text] 译文与原文完全一致，判定翻译未生效");
-                SetPillStatus(owner, "翻译失败", 3000);
-                return;
-            }
-
-            target = translated!;
-        }
-        else
-        {
-            target = lines.Select(l => l.Text).ToArray();
-        }
-
-        int placed = ApplyTranslations(lines, target, clipped);
-        if (translate) TranslateApplied = placed > 0;
-
-        // 识图不再弹面板，那"把文字取走"的出口就只剩剪贴板了：
-        // 顺手复制一份，用户 Ctrl+V 就能用，标签上也说清楚。
-        bool copied = false;
-        if (!translate && placed > 0)
-        {
+            // 提取：复制全文到剪贴板，图面保持原样。
+            string full = string.Join(Environment.NewLine, lines.Select(l => l.Text));
             try
             {
-                Clipboard.SetText(string.Join(Environment.NewLine, lines.Select(l => l.Text)));
-                copied = true;
+                Clipboard.SetText(full);
+                Log.Info($"[text] 识别成功 {lines.Count} 行，已复制到剪贴板（未改动图面）");
+                SetPillStatus(owner, $"已提取 {lines.Count} 行 · 已复制", 3200);
             }
             catch (Exception ex)
             {
                 Log.Info("[text] 复制到剪贴板失败: " + ex.Message);
+                SetPillStatus(owner, $"已提取 {lines.Count} 行 · 复制失败", 3200);
             }
+            Redraw();
+            return;
         }
 
-        if (translate)
-            Log.Info($"[text] 已把 {placed} 行译文写回选区画面（共 {lines.Count} 行）");
-        else
-            Log.Info($"[text] 识别成功 {lines.Count} 行，已写回选区画面（共 {placed} 行）" +
-                     $"{(copied ? "，并已复制到剪贴板" : "")}");
+        // 译文与原文逐行相同 → 公共接口没生效（翻译服务静默回退原文），
+        // 这时把原文重画一遍等于撒谎，只在格位上提示失败。
+        var src = lines.Select(l => l.Text).ToList();
+        int changed = 0;
+        for (int i = 0; i < src.Count && translated != null && i < translated.Length; i++)
+        {
+            var dst = translated[i]?.Trim();
+            if (!string.IsNullOrWhiteSpace(dst) &&
+                !string.Equals(src[i].Trim(), dst, StringComparison.OrdinalIgnoreCase))
+                changed++;
+        }
+
+        if (changed == 0)
+        {
+            Log.Info("[text] 译文与原文完全一致，判定翻译未生效");
+            SetPillStatus(owner, "翻译失败", 3000);
+            return;
+        }
+
+        int placed = ApplyTranslations(lines, translated!, clipped);
+        TranslateApplied = placed > 0;
+
+        Log.Info($"[text] 已把 {placed} 行译文写回选区画面（共 {lines.Count} 行）");
 
         SetPillStatus(owner,
-            placed > 0
-                ? (translate ? $"已翻译 {placed} 行" : $"已提取 {placed} 行{(copied ? " · 已复制" : "")}")
-                : "处理失败",
+            placed > 0 ? $"已翻译 {placed} 行" : "处理失败",
             3200);
         Redraw();
     }
@@ -2451,16 +2514,11 @@ public sealed class OverlaySession : IDisposable
             var screenX = pt.X - half;
             var screenY = pt.Y - half;
 
-            using (var g = Graphics.FromImage(buf))
-            {
-                for (int gy = 0; gy < MagnifierGrid; gy++)
-                    for (int gx = 0; gx < MagnifierGrid; gx++)
-                    {
-                        var col = _sampler.Sample(screenX + gx, screenY + gy);
-                        using var b = new SolidBrush(col);
-                        g.FillRectangle(b, gx, gy, 1, 1);
-                    }
-            }
+            // 直接写像素：原来每格 new SolidBrush + FillRectangle（11×11=121 次/帧），
+            // 在高频重绘下分配压力可观。11×11 小图用 SetPixel 足够快且零分配。
+            for (int gy = 0; gy < MagnifierGrid; gy++)
+                for (int gx = 0; gx < MagnifierGrid; gx++)
+                    buf.SetPixel(gx, gy, _sampler.Sample(screenX + gx, screenY + gy));
 
             f.MagnifierPixels = buf;
             f.PixelColor = _sampler.Sample(pt.X, pt.Y);
@@ -2539,7 +2597,7 @@ public sealed class OverlaySession : IDisposable
         return new Point(x, y);
     }
 
-    /// <summary>抽一小段消息：让注入的滚轮/重绘真正发生。</summary>
+    /// <summary>重绘：把当前状态同步到浮层并提交一帧。</summary>
     private void Redraw()
     {
         // 功能条显隐只取决于"有没有选区 / 是否在拖拽"，统一在这里收敛

@@ -255,8 +255,28 @@ public sealed class ScreenRecorder : IDisposable
         Interlocked.Increment(ref _captured);
     }
 
-    /// <summary>内置 GIF 编码允许占用的内存上限。</summary>
-    private const long MaxGifBytes = 384L * 1024 * 1024;
+    /// <summary>
+    /// 内置 GIF 编码允许占用的内存上限：按可用物理内存的 1/8 动态计算，
+    /// 夹在 [128MB, 512MB]。避免低配机上固定 384MB 拖垮系统，
+    /// 也避免高配机上过于保守导致录制过短。
+    /// </summary>
+    private static long MaxGifBytes
+    {
+        get
+        {
+            try
+            {
+                // .NET 5+ 提供，无需额外引用或 P/Invoke。
+                long available = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+                long budget = available / 8;
+                return Math.Clamp(budget, 128L * 1024 * 1024, 512L * 1024 * 1024);
+            }
+            catch
+            {
+                return 384L * 1024 * 1024;
+            }
+        }
+    }
 
     private int _gifMaxFrames = int.MaxValue;
     private bool _gifTrimWarned;

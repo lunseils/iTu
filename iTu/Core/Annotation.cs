@@ -156,22 +156,56 @@ public sealed class ArrowAnnotation : Annotation
 
     public override void Draw(Graphics g)
     {
-        using var pen = CreatePen();
-        g.DrawLine(pen, Start, End);
+        // 任意方向箭头：以 Start → End 为轴向，构造「圆头箭杆 + 等腰三角头部」。
+        //   头部底边宽于箭杆 → 肩部形成直角台阶；尖端锐角；
+        //   箭杆尾部（Start 端）用半圆封口（圆弧形）。
+        float w = StrokeWidth;
+        float headLen = w * 2.5f;      // 头部三角高度（底边到尖端）—— 保持不变
+        float headHalf = w * 1.2f;     // 头部底边半宽 —— 保持不变
+        float shaftHalf = w * 0.35f;   // 箭杆半宽（比之前更细）
 
         var angle = (float)Math.Atan2(End.Y - Start.Y, End.X - Start.X);
-        float head = Math.Max(10f, StrokeWidth * 4.5f);
-        float spread = 0.42f;
+        float cos = (float)Math.Cos(angle);
+        float sin = (float)Math.Sin(angle);
+        // 轴向单位向量 (cos,sin)，法向单位向量 (nx,ny)（轴向逆时针 90°）
+        float nx = -sin, ny = cos;
 
-        using var headBrush = new SolidBrush(Stroke);
-        var pts = new[]
-        {
-            End,
-            new PointF(End.X - head * (float)Math.Cos(angle - spread), End.Y - head * (float)Math.Sin(angle - spread)),
-            new PointF(End.X - head * 0.62f * (float)Math.Cos(angle), End.Y - head * 0.62f * (float)Math.Sin(angle)),
-            new PointF(End.X - head * (float)Math.Cos(angle + spread), End.Y - head * (float)Math.Sin(angle + spread))
-        };
-        g.FillPolygon(headBrush, pts);
+        // 关键几何点：
+        //   tip      —— 箭头尖端 = End
+        //   baseC    —— 头部底边中心（End 沿轴向后 headLen）
+        //   baseL/R  —— 头部底边两端（baseC 沿法向 ±headHalf）
+        //   shaftTopL/R —— 箭杆与头部衔接处的左右两端（baseC 沿法向 ±shaftHalf）
+        //   startL/R —— 箭杆起点左右两端（Start 沿法向 ±shaftHalf）
+        var tip = End;
+        var baseC = new PointF(End.X - headLen * cos, End.Y - headLen * sin);
+        var baseL = new PointF(baseC.X + headHalf * nx, baseC.Y + headHalf * ny);
+        var baseR = new PointF(baseC.X - headHalf * nx, baseC.Y - headHalf * ny);
+        var shaftTopL = new PointF(baseC.X + shaftHalf * nx, baseC.Y + shaftHalf * ny);
+        var shaftTopR = new PointF(baseC.X - shaftHalf * nx, baseC.Y - shaftHalf * ny);
+        var startL = new PointF(Start.X + shaftHalf * nx, Start.Y + shaftHalf * ny);
+        var startR = new PointF(Start.X - shaftHalf * nx, Start.Y - shaftHalf * ny);
+
+        using var path = new GraphicsPath();
+        // 连续轮廓（顺时针，从尖端开始）：
+        //   尖端 → 右斜边 → 右肩 → 杆右 → 尾部半圆 → 杆左 → 左肩 → 左斜边 → 闭合
+        path.AddLine(tip, baseR);
+        path.AddLine(baseR, shaftTopR);
+        path.AddLine(shaftTopR, startR);
+
+        // 尾部半圆：圆心 Start、半径 shaftHalf，从 startR 逆时针扫 180° 到 startL，
+        // 圆弧凸向轴向反方向（箭杆尾端），形成圆头。
+        float angleDeg = angle * 180f / (float)Math.PI;
+        var tailRect = new RectangleF(
+            Start.X - shaftHalf, Start.Y - shaftHalf, shaftHalf * 2, shaftHalf * 2);
+        path.AddArc(tailRect, angleDeg - 90f, -180f);
+
+        path.AddLine(startL, shaftTopL);
+        path.AddLine(shaftTopL, baseL);
+        path.AddLine(baseL, tip);
+        path.CloseFigure();
+
+        using var brush = new SolidBrush(Stroke);
+        g.FillPath(brush, path);
     }
 
     public override bool HitTest(Point p) => LineAnnotation.DistanceToSegment(p, Start, End) <= Math.Max(6, StrokeWidth * 2);
@@ -765,17 +799,29 @@ public sealed class TranslationAnnotation : Annotation
     private Rectangle _cover;
     private Rectangle _coverKey;
 
-    /// <summary>由"原文墨迹高度 + 原文的墨迹占比"反推原图字号（像素）。</summary>
+    /// <summary>
+    /// 由"原文墨迹高度"反推译文字号（像素）。
+    ///
+    /// 目标是让**译文的墨迹高度等于原文的墨迹高度**，视觉上"和原图一样大"。
+    /// 因此必须用**译文文字自身**的墨迹占比（InkRatio(Text)）去反推字号：
+    ///   译文字号 = 原文墨迹高 / 译文墨迹占比
+    /// 若误用原文文字（InkRatio(SourceText)）去反推，中英字符集墨迹占比不同，
+    /// 英译中会偏大、中译英会偏小（历史字号 BUG 的根源）。
+    /// </summary>
     private float EstimateSourceSize()
     {
         float ink = InkHeight > 1 ? InkHeight : Rect.Height * 0.78f;
 
-        float ratio = InkRatio(SourceText);
-        if (ratio <= 0.05f) ratio = 0.72f;          // 没原文（异常路径）：按拉丁字形估
+        // 用**译文**的墨迹占比反推：译文字号 S 下，其墨迹高 ≈ S × InkRatio(Text)，
+        // 令其等于原文墨迹高 InkHeight，解得 S = InkHeight / InkRatio(Text)。
+        float ratio = InkRatio(Text);
+        if (ratio <= 0.05f) ratio = 0.72f;          // 译文无有效字形（纯符号）：按拉丁字形估
 
-        float size = Math.Clamp(ink / ratio, 8f, 72f);
-        Log.Info($"[text] 字号推算 行高={Rect.Height:F0} 墨高={InkHeight} 占比={ratio:F3} " +
-                 $"→ {size:F1}px  \"{SourceText}\"");
+        // 不再设 72px 上限：高 DPI / 大字号场景下原文墨迹可达数百像素，
+        // 硬钳到 72 会让译文明显小于原文。仅保留下限防止字号坍缩到不可读。
+        float size = Math.Max(8f, ink / ratio);
+        Log.Info($"[text] 字号推算 行高={Rect.Height:F0} 墨高={InkHeight} 译文占比={ratio:F3} " +
+                 $"→ {size:F1}px  原=\"{SourceText}\" 译=\"{Text}\"");
         return size;
     }
 

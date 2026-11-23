@@ -22,6 +22,14 @@ public static class PillChrome
     /// <summary>在目标区域（本地坐标从 0,0 起）绘制整条胶囊。</summary>
     public static void Draw(Graphics g, Rectangle bounds, int hover = -1)
     {
+        // 胶囊边缘全是曲线（左右两端是半径=半高的圆弧），GDI+ 的 1:1 抗锯齿
+        // （8x4 网格）会在白面与深色遮罩的交界留下台阶感。这里局部超采样 2 倍，
+        // 复刻 ituk 的平滑圆角观感。
+        Theme.DrawSupersampled(g, bounds, bg => DrawCore(bg, bounds, hover), factor: 2, margin: 8);
+    }
+
+    private static void DrawCore(Graphics g, Rectangle bounds, int hover)
+    {
         float s = bounds.Width / (float)PillToolbar.BaseSize.Width;
 
         var rect = new RectangleF(0.5f, 0.5f, bounds.Width - 1f, bounds.Height - 1f);

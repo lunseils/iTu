@@ -30,16 +30,13 @@
       旧实例常驻托盘并占着热键时，用户很容易以为改动没生效，
       托盘提示 / 关于-诊断 / 日志里都会打印这个号，便于自证在跑哪一份。
     -->
-    <Version>1.1.8</Version>
+    <Version>1.1.12</Version>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- OCR 脚本随程序一起发布（放在程序根目录，与单文件 exe 同级） -->
-    <None Include="Core\ocr.ps1">
-      <Link>ocr.ps1</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-    </None>
+    <!-- OCR 脚本嵌入 exe（不再作为独立文件发布）：运行时从资源读出，
+         以 powershell -EncodedCommand 执行，发布目录只需一个 iTu.exe。 -->
+    <EmbeddedResource Include="Core\ocr.ps1" LogicalName="iTu.OcrScript" />
   </ItemGroup>
 
 </Project>

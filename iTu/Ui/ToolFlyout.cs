@@ -283,7 +283,7 @@ public sealed class ToolFlyout
         using var text = new SolidBrush(Theme.Text);
 
         // 标签/数值都用排版阶段算好的矩形，不再"按滑杆位置反推"（窄飞层时会压到色块上）
-        g.DrawString(_sliderLabel, font, muted, _labelRect);
+        g.DrawString(_sliderLabel, font, muted, _labelRect, LeftCenter);
         g.DrawString(_sliderValue.ToString(), font, text, _valueRect, RightAlign);
 
         g.Restore(state);
@@ -292,6 +292,12 @@ public sealed class ToolFlyout
     private static readonly StringFormat RightAlign = new(StringFormatFlags.NoWrap)
     {
         Alignment = StringAlignment.Far,
+        LineAlignment = StringAlignment.Center
+    };
+
+    private static readonly StringFormat LeftCenter = new(StringFormatFlags.NoWrap)
+    {
+        Alignment = StringAlignment.Near,
         LineAlignment = StringAlignment.Center
     };
 

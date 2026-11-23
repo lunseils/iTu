@@ -9,8 +9,20 @@ namespace iTu.Core;
 /// </summary>
 public static class Log
 {
+    // 日志路径带用户名短哈希：多用户共用临时目录时避免互相串写。
     private static readonly string Path_ =
-        System.IO.Path.Combine(System.IO.Path.GetTempPath(), "itu.log");
+        System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            "itu-" + StableHash(System.Environment.UserName) + ".log");
+
+    private static string StableHash(string s)
+    {
+        unchecked
+        {
+            uint h = 2166136261;
+            foreach (char c in s) { h ^= c; h *= 16777619; }
+            return h.ToString("x8");
+        }
+    }
 
     private static readonly object Gate = new();
 
@@ -49,6 +61,20 @@ public static class Log
         }
     }
 
+    /// <summary>
+    /// 脱敏：把 Bearer 令牌、api_key/token 等值替换掉，避免凭证落进明文日志。
+    /// 只做最简单可靠的正则匹配，宁可多遮蔽也不泄露。
+    /// </summary>
+    private static string Redact(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return s;
+        s = System.Text.RegularExpressions.Regex.Replace(s,
+            @"(?i)(Bearer\s+)[A-Za-z0-9._\-]+", "$1***");
+        s = System.Text.RegularExpressions.Regex.Replace(s,
+            @"(?i)((?:api_?key|access_?token|token|secret)\s*[=:]\s*)([^\s,;&}]+)", "$1***");
+        return s;
+    }
+
     private static void Append(string message)
     {
         try
@@ -56,7 +82,7 @@ public static class Log
             lock (Gate)
             {
                 File.AppendAllText(Path_,
-                    $"[{DateTime.Now:HH:mm:ss.fff}] {message}{Environment.NewLine}");
+                    $"[{DateTime.Now:HH:mm:ss.fff}] {Redact(message)}{Environment.NewLine}");
             }
         }
         catch
