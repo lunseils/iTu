@@ -9,6 +9,18 @@
 
 ---
 
+## 🖼️ 界面预览
+
+### 截图主界面
+
+![iTu 截图主界面](docs/screenshots/main-ui.png)
+
+### 设置界面
+
+![iTu 设置界面](docs/screenshots/settings-ui.png)
+
+---
+
 ## ✨ 功能特性
 
 ### 截图
