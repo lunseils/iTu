@@ -44,7 +44,7 @@
 
 | 功能 | 实现方式 |
 |---|---|
-| 🔍 屏幕识图（OCR） | 默认走硅基流动 **DeepSeek-OCR** 大模型；未配置 Key 或失败时回退系统 WinRT `OcrEngine`（PowerShell 5.1，中英文）。结果按行采样背景色擦原文、按原图字号重写，同时复制到剪贴板 |
+| 🔍 文字提取（OCR） | 默认走硅基流动 **DeepSeek-OCR** 大模型；未配置 Key 或失败时回退系统 WinRT `OcrEngine`（PowerShell 5.1，中英文）。结果按行采样背景色擦原文、按原图字号重写，同时复制到剪贴板 |
 | 🌐 翻译 | 可切换硅基流动 **Hunyuan-MT-7B** 翻译大模型；免配置模式走 MyMemory / Google 公共端点。译文直接写回选区画面，字号对齐原图 |
 | 🎬 屏幕录制 | 区域录制 → GIF（内置编码器）/ MP4（ffmpeg）；支持暂停/继续、取消、Esc 停止 |
 
@@ -76,7 +76,6 @@
 | **独立版**（推荐） | `dist/iTu-standalone/` | 47 MB | 内含 .NET 运行时，任何 Windows 10/11 双击即用 |
 | 轻量版 | `dist/iTu/` | 490 KB | 需要系统已安装 .NET 10 Desktop Runtime |
 
-> 两个目录里都只有 `iTu.exe` 一个文件——OCR 脚本已内嵌进 exe，无需附带 `ocr.ps1`。
 
 ### 从源码构建
 
