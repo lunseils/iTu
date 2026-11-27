@@ -18,6 +18,55 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
+      # Release 正文以 CHANGELOG.md 为唯一来源：提取当前标签对应版本段落。
+      # 缺失该版本段落即判失败，避免发布出没有更新日志的版本。
+      - name: Extract changelog for this version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ ! -f CHANGELOG.md ]; then
+            echo "::error::仓库根目录缺少 CHANGELOG.md，无法生成更新日志。"
+            exit 1
+          fi
+          awk -v ver="$VERSION" '
+            index($0, "## [" ver "]") == 1 { in_section = 1; next }
+            in_section && /^## \[/ { exit }
+            in_section {
+              if (!started && $0 ~ /^[[:space:]]*$/) next
+              started = 1
+              print
+            }
+          ' CHANGELOG.md > changelog-section.md
+          if ! grep -q '[^[:space:]]' changelog-section.md; then
+            echo "::error::CHANGELOG.md 中未找到版本 ${VERSION} 的条目。请新增形如 \"## [${VERSION}] - YYYY-MM-DD\" 的段落后重新推送标签。"
+            exit 1
+          fi
+          echo "已提取 ${VERSION} 的更新日志："
+          cat changelog-section.md
+
+      - name: Compose release body
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## 更新日志"
+            echo ""
+            cat changelog-section.md
+            echo ""
+            echo "---"
+            echo ""
+            echo "## 下载"
+            echo ""
+            echo "| 版本 | 文件 | 说明 |"
+            echo "|---|---|---|"
+            printf '| 独立版（推荐） | `iTu-%s-standalone-win-x64.exe` | 内含 .NET 10 运行时，Windows 10/11 双击即用 |\n' "$GITHUB_REF_NAME"
+            printf '| 轻量版 | `iTu-%s-win-x64.exe` | 约 0.5 MB，需系统已安装 .NET 10 Desktop Runtime |\n' "$GITHUB_REF_NAME"
+            echo ""
+            echo "两个版本都是单文件，OCR 脚本已内嵌，无需附带其他文件。"
+          } > release-body.md
+          cat release-body.md
+
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
         with:
@@ -39,16 +88,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: iTu ${{ github.ref_name }}
-          generate_release_notes: true
-          body: |
-            ## 下载
-
-            | 版本 | 文件 | 说明 |
-            |---|---|---|
-            | 独立版（推荐） | `iTu-${{ github.ref_name }}-standalone-win-x64.exe` | 内含 .NET 10 运行时，Windows 10/11 双击即用 |
-            | 轻量版 | `iTu-${{ github.ref_name }}-win-x64.exe` | 约 0.5 MB，需系统已安装 .NET 10 Desktop Runtime |
-
-            两个版本都是单文件，OCR 脚本已内嵌，无需附带其他文件。
+          body_path: release-body.md
           files: |
             dist/iTu-${{ github.ref_name }}-win-x64.exe
             dist/iTu-${{ github.ref_name }}-standalone-win-x64.exe
