@@ -30,7 +30,7 @@
       旧实例常驻托盘并占着热键时，用户很容易以为改动没生效，
       托盘提示 / 关于-诊断 / 日志里都会打印这个号，便于自证在跑哪一份。
     -->
-    <Version>1.1.19</Version>
+    <Version>1.1.20</Version>
   </PropertyGroup>
 
   <ItemGroup>
