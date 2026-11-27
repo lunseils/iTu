@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <AssemblyName>pngprobe</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="iTu">
+      <HintPath>..\iTu\bin\Debug\net10.0-windows\iTu.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>

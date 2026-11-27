@@ -42,7 +42,7 @@ public sealed class HintTip : Form
         get
         {
             var cp = base.CreateParams;
-            cp.ExStyle |= 0x00080000;   // WS_EX_LAYERED：逐像素 alpha（圆角 + 柔影）
+            cp.ExStyle |= Native.WS_EX_LAYERED;   // 逐像素 alpha（圆角 + 柔影）
             cp.ExStyle |= 0x08000000;   // WS_EX_NOACTIVATE：不抢焦点
             cp.ExStyle |= 0x00000080;   // WS_EX_TOOLWINDOW：不进 Alt+Tab
             cp.ExStyle |= 0x00000020;   // WS_EX_TRANSPARENT：鼠标穿透（提示不该吃掉滚轮/点击）

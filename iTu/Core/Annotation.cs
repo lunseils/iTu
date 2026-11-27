@@ -500,19 +500,33 @@ public sealed class BlurAnnotation : Annotation
                 }
             }
 
-            // 垂直方向
+            // 垂直方向：先把整列拷进独立缓冲再从副本取窗口值。
+            // 早先直接在 buf 上就地读写，处理第 y 行时 sub 指向的行已被本列
+            // 前面的迭代覆写成模糊值，滑动窗口减去的是新值而非原始值，
+            // 误差沿纵向累积，表现为模糊带拖影/亮度漂移。
+            var colBuf = new byte[bmp.Height * 4];
             for (int x = 0; x < width; x++)
             {
+                for (int y = 0; y < bmp.Height; y++)
+                {
+                    int o = y * stride + x * 4;
+                    int q = y * 4;
+                    colBuf[q] = buf[o];
+                    colBuf[q + 1] = buf[o + 1];
+                    colBuf[q + 2] = buf[o + 2];
+                    colBuf[q + 3] = buf[o + 3];
+                }
+
                 int sumR = 0, sumG = 0, sumB = 0;
                 int windowSize = radius * 2 + 1;
 
                 for (int y = -radius; y <= radius; y++)
                 {
                     int yy = Math.Clamp(y, 0, bmp.Height - 1);
-                    int o = yy * stride + x * 4;
-                    sumR += buf[o];
-                    sumG += buf[o + 1];
-                    sumB += buf[o + 2];
+                    int q = yy * 4;
+                    sumR += colBuf[q];
+                    sumG += colBuf[q + 1];
+                    sumB += colBuf[q + 2];
                 }
 
                 for (int y = 0; y < bmp.Height; y++)
@@ -522,13 +536,11 @@ public sealed class BlurAnnotation : Annotation
                     buf[o + 1] = (byte)(sumG / windowSize);
                     buf[o + 2] = (byte)(sumB / windowSize);
 
-                    int add = Math.Clamp(y + radius + 1, 0, bmp.Height - 1);
-                    int sub = Math.Clamp(y - radius, 0, bmp.Height - 1);
-                    int oa = add * stride + x * 4;
-                    int os = sub * stride + x * 4;
-                    sumR += buf[oa] - buf[os];
-                    sumG += buf[oa + 1] - buf[os + 1];
-                    sumB += buf[oa + 2] - buf[os + 2];
+                    int add = Math.Clamp(y + radius + 1, 0, bmp.Height - 1) * 4;
+                    int sub = Math.Clamp(y - radius, 0, bmp.Height - 1) * 4;
+                    sumR += colBuf[add] - colBuf[sub];
+                    sumG += colBuf[add + 1] - colBuf[sub + 1];
+                    sumB += colBuf[add + 2] - colBuf[sub + 2];
                 }
             }
 
@@ -971,6 +983,7 @@ public sealed class NumberAnnotation : Annotation
     {
         _font?.Dispose();
         _font = null;
+        _fontSizeCached = -1f;   // 与 TextAnnotation 一致，释放后强制下次重算字号
     }
 
     public override Annotation Clone() => new NumberAnnotation

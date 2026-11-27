@@ -424,13 +424,6 @@ public sealed class OverlaySession : IDisposable
         }
     }
 
-    private bool ContainsCursor(OverlayForm f)
-    {
-        f.SyncWindowMetrics();
-        var r = new Rectangle(f.PixelOrigin, f.PixelSize);
-        return r.Contains(_current);
-    }
-
     /// <summary>
     /// 阻塞式消息循环。
     ///
@@ -2570,19 +2563,21 @@ public sealed class OverlaySession : IDisposable
                 continue;
             }
 
-            // 采样 11×11 网格
+            // 采样 11×11 网格。SnapshotSampler 按快照位图局部坐标索引，
+            // 快照 (0,0) 对应虚拟桌面原点，因此必须用 rel（已减 PixelOrigin），
+            // 不能直接用 GetCursorPos 的屏幕坐标，否则多屏负坐标下取色整段偏移。
             int half = MagnifierGrid / 2;
-            var screenX = pt.X - half;
-            var screenY = pt.Y - half;
+            int localX = rel.X - half;
+            int localY = rel.Y - half;
 
             // 直接写像素：原来每格 new SolidBrush + FillRectangle（11×11=121 次/帧），
             // 在高频重绘下分配压力可观。11×11 小图用 SetPixel 足够快且零分配。
             for (int gy = 0; gy < MagnifierGrid; gy++)
                 for (int gx = 0; gx < MagnifierGrid; gx++)
-                    buf.SetPixel(gx, gy, _sampler.Sample(screenX + gx, screenY + gy));
+                    buf.SetPixel(gx, gy, _sampler.Sample(localX + gx, localY + gy));
 
             f.MagnifierPixels = buf;
-            f.PixelColor = _sampler.Sample(pt.X, pt.Y);
+            f.PixelColor = _sampler.Sample(rel.X, rel.Y);
         }
     }
 
@@ -2876,17 +2871,13 @@ public sealed class OverlaySession : IDisposable
     private static Rectangle BarDirty(Rectangle bar) =>
         new(bar.Left - 12, bar.Top - 12, bar.Width + 24, bar.Height + 56);
 
-    private static Rectangle LocalRect(OverlayForm f, Rectangle screen)
-    {
-        if (screen.IsEmpty) return Rectangle.Empty;
-        var tl = f.PointToClient(new Point(screen.Left, screen.Top));
-        return new Rectangle(tl.X, tl.Y, screen.Width, screen.Height);
-    }
-
     private static Rectangle MagnifierScreenRect(OverlayForm f, Point cursor)
     {
         var local = new Point(cursor.X - f.PixelOrigin.X, cursor.Y - f.PixelOrigin.Y);
-        return OverlayForm.GetMagnifierBounds(local, f.PixelSize);
+        var r = OverlayForm.GetMagnifierBounds(local, f.PixelSize);
+        // dirty 是屏幕坐标（Render 里会 ToLocal），这里必须加回窗口原点，
+        // 否则多显示器负坐标下放大镜脏区整体偏移，旧位置留残影、新位置不刷新。
+        return new Rectangle(f.PixelOrigin.X + r.X, f.PixelOrigin.Y + r.Y, r.Width, r.Height);
     }
 
     private static Rectangle SizeBadgeScreenRect(OverlayForm f, Point cursor)
@@ -2931,14 +2922,12 @@ public sealed class OverlaySession : IDisposable
 /// <summary>快照的像素采样器（一次 LockBits，纯内存读取）。</summary>
 internal sealed class SnapshotSampler
 {
-    private readonly Bitmap _bmp;
     private readonly byte[] _buf;
     private readonly int _stride;
     private readonly int _w, _h;
 
     public SnapshotSampler(Bitmap bmp)
     {
-        _bmp = bmp;
         _w = bmp.Width;
         _h = bmp.Height;
         var data = bmp.LockBits(new Rectangle(0, 0, _w, _h),

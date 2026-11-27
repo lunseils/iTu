@@ -38,7 +38,7 @@ public sealed class OverlayForm : Form
         get
         {
             var cp = base.CreateParams;
-            cp.ExStyle |= 0x00080000;   // WS_EX_LAYERED
+            cp.ExStyle |= Native.WS_EX_LAYERED;
             cp.ExStyle |= 0x00000080;   // WS_EX_TOOLWINDOW
             // 刻意不加 WS_EX_NOACTIVATE：Esc / Enter / 文字输入需要键盘焦点
             return cp;
@@ -575,8 +575,6 @@ public sealed class OverlayForm : Form
     /// <summary>选区在屏幕坐标里的位置（用于画工具条）。</summary>
     public Rectangle SelectionScreen { get; set; }
 
-    private bool _radiusMaskFill = true;
-
     /// <summary>
     /// 选区框 + 8 个控制点 + 四边扩拉线。
     ///
@@ -596,9 +594,8 @@ public sealed class OverlayForm : Form
             float r = Math.Min(Radius, Math.Min(sel.Width, sel.Height) / 2f);
             using var path = Theme.RoundedRect(sel, r);
 
-            if (_radiusMaskFill)
+            using (var outside = new Region(sel))
             {
-                using var outside = new Region(sel);
                 outside.Exclude(path);
                 using var mask = new SolidBrush(Color.FromArgb(120, 0, 0, 0));
                 g.FillRegion(mask, outside);

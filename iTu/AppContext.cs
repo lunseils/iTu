@@ -464,6 +464,8 @@ public sealed class AppContext : ApplicationContext
             {
                 if (Core.ResultWriter.TrySave(img, _settings, out var path))
                     _tray.ShowBalloonTip(1600, "iTu", "已保存 " + System.IO.Path.GetFileName(path), ToolTipIcon.None);
+                else
+                    Toast.Show(null, "保存失败，请检查保存目录与磁盘空间", Theme.Danger);
             }
             return;
         }

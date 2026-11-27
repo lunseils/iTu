@@ -108,7 +108,14 @@ public sealed class AppSettings
             if (File.Exists(FilePath))
             {
                 var loaded = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath), Opts);
-                if (loaded != null) return loaded;
+                // 属性「缺失」会保留初始值，但显式写成 null 会把初始值覆盖掉。
+                // 对字符串统一归一，避免 null 沿链路扩散（SaveDirectory→目录创建失败、
+                // TranslateTarget→StartsWith 抛 NRE、热键→静默不注册）。
+                if (loaded != null)
+                {
+                    loaded.Normalize();
+                    return loaded;
+                }
             }
         }
         catch
@@ -118,12 +125,34 @@ public sealed class AppSettings
         return new AppSettings();
     }
 
+    private void Normalize()
+    {
+        CaptureHotkey ??= "Ctrl+Alt+A";
+        FullscreenHotkey ??= "Ctrl+Alt+S";
+        RecordHotkey ??= "Ctrl+Shift+F";
+        SaveDirectory ??= Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "iTu");
+        if (string.IsNullOrWhiteSpace(SaveDirectory))
+            SaveDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "iTu");
+        FileNamePattern ??= "截图_{date}_{time}";
+        TranslateTarget ??= "zh-CN";
+        SiliconFlowApiKey ??= "";
+        SiliconFlowBaseUrl ??= "https://api.siliconflow.cn/v1";
+        SiliconFlowTranslateModel ??= "tencent/Hunyuan-MT-7B";
+        SiliconFlowOcrModel ??= "deepseek-ai/DeepSeek-OCR";
+    }
+
     public void Save()
     {
         try
         {
             Directory.CreateDirectory(Dir);
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(this, Opts));
+            // 先写临时文件再原子替换：WriteAllText 直接覆盖原文件，
+            // 中途失败/断电会留下截断的 settings.json，下次 Load 回退全默认、配置全丢。
+            var tmp = FilePath + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(this, Opts));
+            File.Move(tmp, FilePath, true);
         }
         catch
         {

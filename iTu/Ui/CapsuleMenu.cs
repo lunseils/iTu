@@ -57,7 +57,7 @@ public sealed class CapsuleMenu : Form
         get
         {
             var cp = base.CreateParams;
-            cp.ExStyle |= 0x00080000;   // WS_EX_LAYERED：圆角与柔影需要逐像素 alpha
+            cp.ExStyle |= Native.WS_EX_LAYERED;   // 圆角与柔影需要逐像素 alpha
             cp.ExStyle |= 0x00000080;   // WS_EX_TOOLWINDOW
             return cp;
         }

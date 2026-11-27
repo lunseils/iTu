@@ -13,6 +13,11 @@ namespace iTu.Ui;
 /// </summary>
 public static class ShareService
 {
+    // 强引用持有清理定时器：直接 `_ = new Timer(...)` 会被 GC 回收，
+    // 10 分钟后的删除回调可能永不执行，%TEMP%\iTu 里的临时附件会永久堆积。
+    private static readonly HashSet<System.Threading.Timer> CleanupTimers = new();
+    private static readonly object CleanupLock = new();
+
     /// <summary>在指定屏幕位置弹出转发菜单。</summary>
     /// <param name="owner">用于弹出 Toast 的宿主窗口。</param>
     /// <param name="origin">菜单左上角的屏幕坐标。</param>
@@ -79,34 +84,56 @@ public static class ShareService
     /// <summary>邮件转发：图片存到临时文件，再拉起默认邮件客户端（正文带上文件路径）。</summary>
     private static void SendByMail(IWin32Window owner, Func<Bitmap> render, Action<string> onStatus)
     {
+        string? file = null;
         try
         {
             var dir = Path.Combine(Path.GetTempPath(), "iTu");
             Directory.CreateDirectory(dir);
-            var file = Path.Combine(dir, $"iTu-{DateTime.Now:yyyyMMdd-HHmmss}.png");
+            // 秒级时间戳同一秒内两次发送会互相覆盖，且两个 Timer 会指向同一路径，
+            // 先触发者删掉后者尚未拖入的附件。改用 GUID 保证唯一。
+            file = Path.Combine(dir, $"iTu-{Guid.NewGuid():N}.png");
 
             using (var image = render())
             {
-                image.Save(file, System.Drawing.Imaging.ImageFormat.Png);
+                // Image.Save(string) 内部用 FileMode.Create，编码失败会留下 0 字节 PNG。
+                using (var fs = new FileStream(file, FileMode.CreateNew, FileAccess.Write))
+                    image.Save(fs, System.Drawing.Imaging.ImageFormat.Png);
                 Clipboard.SetImage(image);
             }
 
             var body = Uri.EscapeDataString("截图已保存到：" + file);
-            Process.Start(new ProcessStartInfo($"mailto:?subject=截图&body={body}") { UseShellExecute = true });
+            Process.Start(new ProcessStartInfo(
+                $"mailto:?subject={Uri.EscapeDataString("截图")}&body={body}") { UseShellExecute = true });
 
             // 邮件只是"拖入附件"的中转，不能永久堆积在 %TEMP%\iTu。
-            // 给邮件客户端留出拖入时间后自动清理；失败也只记日志。
-            _ = new System.Threading.Timer(_ =>
+            // 定时器必须被静态字段强引用，否则 GC 可能提前回收导致回调永不执行。
+            var path = file;
+            System.Threading.Timer? timer = null;
+            timer = new System.Threading.Timer(_ =>
             {
-                try { File.Delete(file); }
+                try { File.Delete(path); }
                 catch (Exception ex) { Core.Log.Info($"[share] 清理临时邮件图片失败: {ex.Message}"); }
+                finally
+                {
+                    if (timer != null)
+                    {
+                        lock (CleanupLock) CleanupTimers.Remove(timer);
+                        timer.Dispose();
+                    }
+                }
             }, null, TimeSpan.FromMinutes(10), System.Threading.Timeout.InfiniteTimeSpan);
+            lock (CleanupLock) CleanupTimers.Add(timer);
 
             Toast.Show(owner, "已保存并打开邮件，附件请拖入：" + Path.GetFileName(file), Theme.Success);
             onStatus("邮件转发");
         }
         catch (Exception ex)
         {
+            // 编码/拉起邮件客户端失败时不能留下半成品 PNG。
+            if (file != null)
+            {
+                try { File.Delete(file); } catch { /* 忽略 */ }
+            }
             Toast.Show(owner, "邮件转发失败：" + ex.Message, Theme.Danger);
         }
     }

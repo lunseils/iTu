@@ -170,7 +170,10 @@ public sealed class ScreenRecorder : IDisposable
             long wait = next - clock.ElapsedMilliseconds;
             if (wait > 0)
             {
-                try { Thread.Sleep((int)wait); } catch { }
+                // wait 是 long，超过 int.MaxValue 时强转会溢出成负数，
+                // Thread.Sleep 抛异常被吞会让该帧不休眠直接进下一轮（忙等 + CPU 尖峰）。
+                try { Thread.Sleep((int)Math.Min(wait, int.MaxValue)); }
+                catch (Exception ex) { Log.Info($"[record] 帧休眠失败: {ex.Message}"); }
             }
             else
             {
@@ -411,21 +414,24 @@ public sealed class ScreenRecorder : IDisposable
         _ffmpeg = null;
         if (proc != null)
         {
+            bool killed = false;
             try { proc.StandardInput.Close(); } catch { }
             try
             {
-                if (!proc.WaitForExit(10000)) { proc.Kill(); proc.WaitForExit(2000); }
+                if (!proc.WaitForExit(10000)) { proc.Kill(); proc.WaitForExit(2000); killed = true; }
             }
-            catch { }
+            catch { killed = true; }
             try { proc.Dispose(); } catch { }
 
             var path0 = OutputPath;
             long size = 0;
             try { if (path0 != null && File.Exists(path0)) size = new FileInfo(path0).Length; } catch { }
 
-            if (path0 == null || size == 0)
+            // 被强杀时 MP4 可能缺 moov atom、GIF 缺 trailer，仅凭 size>0 判成功
+            // 会留下打不开的损坏文件（与「这不是一个图像文件」同类体验）。
+            if (path0 == null || size == 0 || killed)
             {
-                Log.Info($"[record] ffmpeg 未产出有效文件（帧数={FrameCount}）");
+                Log.Info($"[record] ffmpeg 未产出有效文件（帧数={FrameCount} 被终止={killed}）");
                 DeleteOutputFile();
                 _state = RecordState.Idle;
                 return null;
